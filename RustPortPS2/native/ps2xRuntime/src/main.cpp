@@ -3,6 +3,9 @@
 void ps2InstallEeDiff(PS2Runtime &runtime); // src/lib/ee_ref/ee_diff.cpp
 void ps2InstallEeWatch(PS2Runtime &runtime);
 void ps2InstallEePageWatch(PS2Runtime &runtime);
+// GOW-Port: drains the log writer's pipe into last.log (gow_integration.cpp). std::_Exit and std::abort skip atexit, where
+// the pipe was emptied before, so the last lines of a failing session could be lost.
+void gowFlushLog();
 #include "games_database.h"
 #if defined(PS2X_ENABLE_DEBUG_UI)
 #include "ps2_debug_panel.h"
@@ -50,6 +53,7 @@ namespace
                                        std::cerr << "[terminate] non-std exception" << std::endl;
                                    }
                                }
+                               gowFlushLog(); // GOW-Port
                                std::abort(); });
     }
 
@@ -164,6 +168,7 @@ int main(int argc, char *argv[])
 #endif
         std::cout.flush();
         std::cerr.flush();
+        gowFlushLog(); // GOW-Port
         std::_Exit(0);
     }
     catch (const std::exception &e)
@@ -177,5 +182,6 @@ int main(int argc, char *argv[])
 
     std::cout.flush();
     std::cerr.flush();
+    gowFlushLog(); // GOW-Port
     std::_Exit(1);
 }

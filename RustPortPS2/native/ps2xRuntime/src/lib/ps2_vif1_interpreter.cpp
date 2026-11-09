@@ -509,7 +509,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
     uint32_t pos = 0;
     static const bool traceVif = std::getenv("GOW_VIF_DIAG") != nullptr;
-    // GOW-Port: GOW_VIF_DIAG=1 keeps the last commands of this DMA to diagnose lost alignment.
+    // GOW-Port: the last commands of this DMA, to diagnose lost alignment. Always kept (one store per command), so the
+    // first stream fault of a player's session prints them without GOW_VIF_DIAG (issue #34: faults right after a save).
     struct VifCommand { uint32_t offset; uint32_t code; };
     VifCommand commands[8] = {};
     uint32_t commandCount = 0u;
@@ -548,8 +549,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         const uint32_t cmdOffset = pos;
         memcpy(&cmd, data + pos, 4);
         pos += 4;
-        if (traceVif)
-            commands[commandCount++ & 7u] = {cmdOffset, cmd};
+        commands[commandCount++ & 7u] = {cmdOffset, cmd};
 
         uint8_t opcode = (cmd >> 24) & 0x7F;
         uint16_t imm = cmd & 0xFFFF;
@@ -1129,11 +1129,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         std::fprintf(stderr, "[gow-vif] invalid stream saved to %s, command at 0x%08x\n", dumpPath, cmdOffset);
                     }
             static unsigned unknownCmds = 0;
-            if (++unknownCmds <= 20u)
+            ++unknownCmds;
+            // GOW-Port: the count goes on past the first 20 lines, so a report tells a one-off from a fault every frame.
+            if (unknownCmds > 20u && (unknownCmds & (unknownCmds - 1u)) == 0u)
+                std::fprintf(stderr, "[vif1] %u stream faults so far\n", unknownCmds);
+            if (unknownCmds <= 20u)
             {
                 std::fprintf(stderr, "[vif1] unhandled VIFcode opcode=%02x imm=%04x num=%u pos=%08x size=%08x\n",
                              opcode, imm, num, cmdOffset, sizeBytes);
-                if (traceVif)
+                // GOW-Port: the first faults print the commands before them and the words around them without
+                // GOW_VIF_DIAG: that is what tells which command left the stream misaligned. No game data beyond these
+                // few words reaches the log.
+                if (traceVif || unknownCmds <= 2u)
                 {
                     const uint32_t count = std::min(commandCount, 8u);
                     for (uint32_t i = 0u; i < count; ++i)
@@ -1150,6 +1157,20 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         std::fprintf(stderr, "[vif1] word offset=%08x value=%08x\n", p, word);
                     }
                 }
+            }
+            // GOW-Port: a stream that stops here never reaches the MSKPATH3 that would unmask PATH3 again, so the texture
+            // uploads queued behind the mask would wait for good and the GS would keep drawing with stale textures (the
+            // likely cause of issue #34: blocky picture after a save until the game was restarted, with this fault in
+            // every frame). The rest of this stream is lost either way; the queued PATH3 packets are released so the next
+            // frames upload their textures.
+            if (m_path3Masked)
+            {
+                static unsigned released = 0;
+                if (++released <= 5u)
+                    std::fprintf(stderr, "[vif1] stream fault with PATH3 masked: unmasked, %zu queued packets released\n",
+                                 m_path3MaskedFifo.size());
+                m_path3Masked = false;
+                flushMaskedPath3Packets();
             }
             // GOW-Port: a reserved VIF code is a stream fault, not a four-byte
             // no-op.  Continuing treated its payload as commands and could launch

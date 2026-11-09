@@ -72,6 +72,12 @@ Last reviewed: October 2026, against the code in this repository.
   (`0x117358..0x117384`), at the end of the save menus. Why that loop stops converging is not known yet: since this change the
   hang report prints its values (`[gow-hang] animation step loop` / `animation controller`). Not fixed; see
   [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for what to collect.
+- **Blocky picture after saving (issue #34):** right after a save, a VU1 command stream reached a reserved VIFcode in every
+  frame (`[vif1] unhandled VIFcode opcode=25`). A stream that stops while PATH3 is masked never unmasks it, so texture
+  uploads stayed queued until a restart, the likely cause of the picture; since 0.3.4 they are released. Not verified in
+  game yet. Which command misaligns the stream is not known: the first faults now print the commands before them.
+- **Character stuck after the sixth Gorgon Eye (issue #35):** reproduced by one player many times; the log just stops,
+  with no hang report. Since 0.3.4 a crash leaves a `[gow-crash]` line and the log is no longer cut at exit. Not fixed.
 - **Windows Release build:** the default installer configuration (no whole-program optimization, AVX2 off) has never
   been compared in game against the faster development build. Numbers measured in a development build may
   not carry over.

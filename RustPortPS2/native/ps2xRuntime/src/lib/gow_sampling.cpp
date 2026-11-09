@@ -9,11 +9,14 @@
 // resumes it. Nothing is allocated or locked while a thread is suspended (it could hold the heap lock).
 // On completion it writes the file read by ps2-dev sampling-win together with
 // gow-2005.map (CMake option PS2X_MAP).
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 #include <thread>
@@ -23,9 +26,17 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <io.h>
 #include <psapi.h>
 #include <tlhelp32.h>
 #include <mmsystem.h>
+#else
+#include <dlfcn.h>
+#include <ucontext.h>
+#include <unistd.h>
+#endif
+
+#ifdef _WIN32
 
 namespace
 {
@@ -189,7 +200,151 @@ void gowSamplingStart()
     const int us = static_cast<int>(number("GOW_SAMPLING_US", 2000.0));
     std::thread(body, std::string(path), delay, seconds, us < 200 ? 200 : us).detach();
 }
+
+// GOW-Port: crash report. A fault or an abort used to end the process with nothing in last.log (issue #35: the log just
+// stops, and the launcher only knows the session was "interrupted"). On the first unhandled exception (or abort) one
+// [gow-crash] line says what happened and where ("gow-2005+0x..." is found in gow-2005.map), after the last guest
+// branches. The process then ends as before, with the same exit code, so the launcher still classifies the failure.
+void gowDumpBranchRing(const char *why); // ps2_runtime.cpp
+
+namespace
+{
+    HANDLE g_crashLog = INVALID_HANDLE_VALUE; // the file the launcher opened for stderr (not the log pipe)
+    std::atomic<bool> g_crashed{false};
+
+    void crashWrite(const char *text)
+    {
+        if (g_crashLog == INVALID_HANDLE_VALUE || g_crashLog == nullptr)
+            return;
+        DWORD written = 0;
+        WriteFile(g_crashLog, text, static_cast<DWORD>(std::strlen(text)), &written, nullptr);
+    }
+
+    void describeAddress(uintptr_t address, char *out, size_t size)
+    {
+        HMODULE module = nullptr;
+        char path[MAX_PATH] = {};
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(address), &module) &&
+            module && GetModuleFileNameA(module, path, MAX_PATH))
+        {
+            const char *name = std::strrchr(path, '\\');
+            std::snprintf(out, size, "%s+0x%llx", name ? name + 1 : path,
+                          static_cast<unsigned long long>(address - reinterpret_cast<uintptr_t>(module)));
+        }
+        else
+            std::snprintf(out, size, "0x%llx", static_cast<unsigned long long>(address));
+    }
+
+    void crashReport(const char *line)
+    {
+        // The guest branches go through stderr on a helper thread: the crashed thread may hold the stderr lock, so the
+        // helper is not waited for more than half a second.
+        if (HANDLE helper = CreateThread(nullptr, 0, [](LPVOID) -> DWORD { gowDumpBranchRing("crash"); std::fflush(stderr); return 0; },
+                                         nullptr, 0, nullptr))
+        {
+            WaitForSingleObject(helper, 500);
+            CloseHandle(helper);
+        }
+        Sleep(300); // the log writer thread empties the pipe into the file first, so the line below comes last
+        crashWrite(line);
+    }
+
+    LONG WINAPI crashFilter(EXCEPTION_POINTERS *info)
+    {
+        if (info && info->ExceptionRecord && !g_crashed.exchange(true))
+        {
+            const EXCEPTION_RECORD *record = info->ExceptionRecord;
+            char where[192];
+            describeAddress(reinterpret_cast<uintptr_t>(record->ExceptionAddress), where, sizeof(where));
+            char access[64] = "";
+            if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2)
+            {
+                const ULONG_PTR kind = record->ExceptionInformation[0];
+                std::snprintf(access, sizeof(access), " %s 0x%llx", kind == 0 ? "reading" : kind == 1 ? "writing" : "executing",
+                              static_cast<unsigned long long>(record->ExceptionInformation[1]));
+            }
+            char line[384];
+            std::snprintf(line, sizeof(line), "[gow-crash] exception 0x%08lX at %s%s, thread %lu\n",
+                          static_cast<unsigned long>(record->ExceptionCode), where, access, static_cast<unsigned long>(GetCurrentThreadId()));
+            crashReport(line);
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    void crashAbort(int)
+    {
+        if (!g_crashed.exchange(true))
+            crashReport("[gow-crash] abort (a failed check or an unhandled C++ exception; [terminate] lines above say which)\n");
+    }
+}
+
+void gowCrashHandlerInstall(int logFd)
+{
+    static std::atomic<bool> installed{false};
+    if (installed.exchange(true))
+        return;
+    g_crashLog = logFd >= 0 ? reinterpret_cast<HANDLE>(_get_osfhandle(logFd)) : GetStdHandle(STD_ERROR_HANDLE);
+    SetUnhandledExceptionFilter(crashFilter);
+    std::signal(SIGABRT, crashAbort);
+}
 #else
 void gowSamplingStart() {}
 void gowSamplingBurst(const char *, double, int) {}
+
+// GOW-Port: crash report on Linux (see the Windows version above): one [gow-crash] line with the signal and the host
+// address ("gow-2005+0x..."), then the last guest branches; the signal is raised again with its default action.
+void gowDumpBranchRing(const char *why); // ps2_runtime.cpp
+
+namespace
+{
+    int g_crashFd = 2;
+    std::atomic<bool> g_crashed{false};
+
+    void crashSignal(int signalNumber, siginfo_t *info, void *context)
+    {
+        if (!g_crashed.exchange(true))
+        {
+            uintptr_t pc = 0;
+#if defined(__x86_64__) && defined(REG_RIP)
+            if (context)
+                pc = static_cast<uintptr_t>(static_cast<ucontext_t *>(context)->uc_mcontext.gregs[REG_RIP]);
+#else
+            (void)context;
+#endif
+            char where[256];
+            Dl_info module{};
+            if (pc && dladdr(reinterpret_cast<void *>(pc), &module) && module.dli_fname)
+            {
+                const char *name = std::strrchr(module.dli_fname, '/');
+                std::snprintf(where, sizeof(where), "%s+0x%llx", name ? name + 1 : module.dli_fname,
+                              static_cast<unsigned long long>(pc - reinterpret_cast<uintptr_t>(module.dli_fbase)));
+            }
+            else
+                std::snprintf(where, sizeof(where), "0x%llx", static_cast<unsigned long long>(pc));
+            char line[384];
+            const int length = std::snprintf(line, sizeof(line), "[gow-crash] signal %d at %s, address 0x%llx\n", signalNumber, where,
+                                             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(info ? info->si_addr : nullptr)));
+            if (length > 0)
+                (void)!write(g_crashFd, line, static_cast<size_t>(std::min<int>(length, sizeof(line) - 1)));
+            gowDumpBranchRing("crash");
+        }
+        std::signal(signalNumber, SIG_DFL);
+        std::raise(signalNumber);
+    }
+}
+
+void gowCrashHandlerInstall(int logFd)
+{
+    static std::atomic<bool> installed{false};
+    if (installed.exchange(true))
+        return;
+    g_crashFd = logFd >= 0 ? logFd : 2;
+    struct sigaction action{};
+    action.sa_sigaction = crashSignal;
+    action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&action.sa_mask);
+    for (const int signalNumber : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT})
+        sigaction(signalNumber, &action, nullptr);
+}
 #endif

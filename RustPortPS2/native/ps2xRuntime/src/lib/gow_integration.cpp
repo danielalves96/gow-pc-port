@@ -59,12 +59,18 @@ namespace
     {
         int original[2] = {-1, -1}; // stdout, stderr as they were (the files the launcher opened)
         std::thread threads[2];
+        std::atomic<bool> stopped{false};
     };
     LogWriter g_logWriter;
 
+    // GOW-Port: drains the pipe into the file and puts the original streams back. It runs once: at exit through atexit,
+    // and from gowFlushLog() wherever the process ends without atexit (main's std::_Exit, std::terminate). Before it ran
+    // only through atexit, which std::_Exit skips, so the last lines of a session could stay in the pipe.
     void stopLogWriter()
     {
 #if defined(_WIN32)
+        if (g_logWriter.stopped.exchange(true))
+            return;
         for (int i = 0; i < 2; ++i)
         {
             if (g_logWriter.original[i] < 0)
@@ -130,6 +136,14 @@ namespace
     }
 }
 
+// GOW-Port: called by main before std::_Exit and by the std::terminate logger before std::abort (src/main.cpp).
+void gowFlushLog()
+{
+    std::fflush(stdout);
+    std::fflush(stderr);
+    stopLogWriter();
+}
+
 namespace ps2_stubs
 {
     // GOW-Port: kept out of MemoryCard.h so generated game units do not need rebuilding for a diagnostic hook.
@@ -158,6 +172,7 @@ void gowRetroAchievementsVBlank(uint8_t *rdram);
 void gowRetroAchievementsDraw();
 void gowSamplingStart(); // gow_sampling.cpp (GOW_SAMPLING)
 void gowSamplingBurst(const char *path, double seconds, int intervalUs); // gow_sampling.cpp: synchronous sampling for a few seconds
+void gowCrashHandlerInstall(int logFd); // gow_sampling.cpp: [gow-crash] line when the process dies of a fault or abort
 int gowLogicFps(); // GOW-Port: below (PC_LOGIC_FPS)
 bool gowEarlyFinishAvailable(); // GOW-Port: lib/ps2_memory.cpp (the Frame Rate page of the menus)
 bool gowEarlyFinishGet();
@@ -893,6 +908,9 @@ static void gowHangReport(PS2Runtime &runtime, uint64_t vsyncStep, uint64_t fram
 void gowIntegrationInstall(PS2Runtime &runtime, const std::string &elfPath)
 {
     startLogWriter(); // GOW-Port: the log through a writer thread (see LogWriter)
+    // GOW-Port: a crash used to leave no trace in last.log (issue #35: the log just stops). The handler writes straight
+    // into the file the launcher opened, after the writer thread had time to empty the pipe.
+    gowCrashHandlerInstall(g_logWriter.original[1]);
     gowSamplingStart(); // optional sampling profiler (GOW_SAMPLING=<file>)
     if (runtime.hasFunction(kGowPad2Read))
     {
