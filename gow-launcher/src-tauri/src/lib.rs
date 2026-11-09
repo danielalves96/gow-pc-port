@@ -215,8 +215,8 @@ fn detected_iso() -> String {
 }
 
 #[tauri::command]
-fn memory_card_directory(elf: String) -> String {
-    game::memory_card_directory(&elf)
+fn memory_card_file(elf: String) -> String {
+    game::memory_card_file(&elf)
 }
 
 // ---------------------------------------------------------------------------------------------- playing
@@ -994,7 +994,7 @@ pub fn run() {
             game_status,
             detect_paths,
             detected_iso,
-            memory_card_directory,
+            memory_card_file,
             start_game,
             stop_game,
             is_game_running,

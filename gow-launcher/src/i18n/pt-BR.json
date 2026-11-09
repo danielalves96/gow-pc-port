@@ -146,7 +146,7 @@
   "executableOk": "Pronto",
   "executableNotExe": "O arquivo não é executável.",
   "memory": "Cartão de memória",
-  "memoryDesc": "Pasta onde os jogos salvos são armazenados.",
+  "memoryDesc": "Imagem do cartão de memória (Mcd001.ps2) com todos os seus jogos salvos. Faça backup deste arquivo para guardar seus saves.",
   "browse": "Procurar",
   "open": "Abrir",
   "empty": "Limpar",

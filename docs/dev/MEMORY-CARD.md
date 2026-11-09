@@ -8,8 +8,8 @@ the IOP services around it are native code.
 
 | Container | Resolution |
 |---|---|
-| IOP side (`mc2_d`) | `GOW_MC0` / `GOW_MC1`, defaulting to `Mcd001.ps2` next to the ELF (`iop_emulator.cpp`) |
-| EE side (`mc0:` paths) | `<ELF dir>/mc0`, the folder the launcher shows in **Files → Memory card** |
+| IOP side (`mc2_d`) | `GOW_MC0` / `GOW_MC1`, defaulting to `Mcd001.ps2` next to the ELF (`iop_emulator.cpp`); the file the launcher shows in **Files → Memory card** |
+| EE side (`mc0:` paths) | `<ELF dir>/mc0` |
 
 `GOW_MC0=0` leaves slot 1 empty; `GOW_MC1` is only read when set, so slot 2 is disconnected by default. Saves go to the
 IOP container, which is why the 8 MB `Mcd001.ps2` is the file to back up. The `mc0/` folder only holds the few

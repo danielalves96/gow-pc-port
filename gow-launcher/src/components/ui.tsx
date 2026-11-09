@@ -345,11 +345,13 @@ interface PathFieldProps {
   filters?: { name: string; extensions: string[] }[];
   clearable?: boolean;
   folderOnly?: boolean;
+  /** What "Open" opens when it is not `path` itself (e.g. the folder of a file that may not exist yet). */
+  openTarget?: string;
   onChange?: (path: string) => void;
 }
 
 /** Editable path with "Browse" and a status line. */
-export function PathField({ path, status, severity = 'success', dialogTitle, filters, clearable, folderOnly, onChange }: PathFieldProps) {
+export function PathField({ path, status, severity = 'success', dialogTitle, filters, clearable, folderOnly, openTarget, onChange }: PathFieldProps) {
   const { api, t } = useApp();
   const [draft, setDraft] = useState(path);
   useEffect(() => setDraft(path), [path]);
@@ -373,7 +375,7 @@ export function PathField({ path, status, severity = 'success', dialogTitle, fil
         />
         {!folderOnly && <SecondaryButton onClick={() => void browse()}>{t('browse')}</SecondaryButton>}
         {clearable && path.length > 0 && <SecondaryButton onClick={() => onChange?.('')}>{t('empty')}</SecondaryButton>}
-        {folderOnly && <SecondaryButton onClick={() => void api.openDirectory(path)}>{t('open')}</SecondaryButton>}
+        {folderOnly && <SecondaryButton onClick={() => void api.openDirectory(openTarget ?? path)}>{t('open')}</SecondaryButton>}
       </div>
       {status && <StatusLine severity={severity}>{status}</StatusLine>}
     </div>

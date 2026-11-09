@@ -90,7 +90,7 @@ the runtime files: then it asks once.
 | Game executable (`SCUS_973.99`) | The PS2 program from your disc. Verified by CRC; "Modified ELF · experimental build" means the file was changed |
 | Disc image (ISO) | Optional: if it is empty, an `.iso` beside the game or the already-extracted files are used. The field disappears once the game data is in place |
 | Port runner (`gow-2005`) | The compiled game program |
-| Memory card | Read-only: the folder next to `SCUS_973.99` (`mc0`). Saves themselves live in `Mcd001.ps2` (see [`PLAYING.md`](PLAYING.md#saves-and-the-memory-card)) |
+| Memory card | Read-only: the card image `Mcd001.ps2` next to `SCUS_973.99`, which holds every save; **Open** opens its folder (see [`PLAYING.md`](PLAYING.md#saves-and-the-memory-card)) |
 
 **Find files automatically** looks next to the launcher, in a repository checkout above it and in the default
 installation folder. **Setup wizard** reopens the installer.

@@ -45,7 +45,7 @@ export interface Api {
   gameStatus(): Promise<GameStatus>;
   detectPaths(force: boolean): Promise<Settings>;
   detectedIso(): Promise<string>;
-  memoryCardDirectory(elf: string): Promise<string>;
+  memoryCardFile(elf: string): Promise<string>;
   startGame(): Promise<void>; // rejects with a LaunchError
   stopGame(): Promise<void>;
   isGameRunning(): Promise<boolean>;
@@ -130,7 +130,7 @@ async function createTauriApi(): Promise<Api> {
     gameStatus: () => call('game_status'),
     detectPaths: (force) => call('detect_paths', { force }),
     detectedIso: () => call('detected_iso'),
-    memoryCardDirectory: (elf) => call('memory_card_directory', { elf }),
+    memoryCardFile: (elf) => call('memory_card_file', { elf }),
     startGame: () => call('start_game'),
     stopGame: () => call('stop_game'),
     isGameRunning: () => call('is_game_running'),
@@ -356,7 +356,7 @@ export function createMockApi(
     gameStatus: async () => status(),
     detectPaths: async () => settings,
     detectedIso: async () => '',
-    memoryCardDirectory: async (elf) => (elf ? elf.replace(/[\\/][^\\/]*$/, '') + '\\mc0' : ''),
+    memoryCardFile: async (elf) => (elf ? elf.replace(/[\\/][^\\/]*$/, '') + '\\Mcd001.ps2' : ''),
     startGame: async () => {
       // The same refusals as `start_game`.
       if (profileStage !== 'none') throw { key: 'errorProfiling', detail: '' };

@@ -146,7 +146,7 @@
   "executableOk": "Ready",
   "executableNotExe": "The file is not executable",
   "memory": "Memory card",
-  "memoryDesc": "Folder where saved games are kept.",
+  "memoryDesc": "Memory card image (Mcd001.ps2) that holds all your saved games. Back up this file to keep your saves.",
   "browse": "Browse",
   "open": "Open",
   "empty": "Clear",
