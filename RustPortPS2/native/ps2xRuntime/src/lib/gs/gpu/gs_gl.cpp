@@ -13,6 +13,15 @@
 #include <mutex>
 #include <string_view>
 
+// GOW-Port: the minimum time between two new window frames (see below); the Frame Rate page of the menus changes it with the FPS limit
+// (gow_integration.cpp calls this: a light object like this one must not depend on that heavy one, or the VU1 generator tool, which
+// links the GS code, would pull the whole game integration with it).
+static std::atomic<long> g_gowPresentMinIntervalUs{-1};
+void gowPresentMinIntervalSet(long microseconds)
+{
+    g_gowPresentMinIntervalUs.store(microseconds, std::memory_order_relaxed);
+}
+
 // GOW-Port: shared presentation (PS2X_GS_DIRECT_PRESENT, on by default): the GS context shares
 // textures with the window's and delivers each frame as a texture, without reading it to RAM. The gaps, the fences and the
 // loading of the GL functions are common; capturing the window's context and creating the
@@ -672,10 +681,12 @@ namespace GSSharedPresent
             // GOW-Port: the window never advances to a new frame less than 15 ms after the previous one (at most ~66 new frames/s;
             // normal flow is one every 16.7 ms and is not affected). A burst that completes together is spread over the next
             // refreshes instead of being shown faster than real time; GOW_PRESENT_MIN_INTERVAL_US=0 disables it.
-            static const long minIntervalUs = [] {
+            static const long environmentUs = [] {
                 const char *v = std::getenv("GOW_PRESENT_MIN_INTERVAL_US");
                 return v ? std::max(0L, std::strtol(v, nullptr, 10)) : 15000L;
             }();
+            const long chosenUs = g_gowPresentMinIntervalUs.load(std::memory_order_relaxed);
+            const long minIntervalUs = chosenUs >= 0 ? chosenUs : environmentUs;
             static std::chrono::steady_clock::time_point lastAdvance{};
             const auto now = std::chrono::steady_clock::now();
             if (s_readingSlot >= 0 && minIntervalUs > 0 &&

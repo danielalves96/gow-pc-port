@@ -115,7 +115,9 @@ physical position. F1/F2/F11 are reserved and marked as such.
 ### Cheats
 
 The nine cheats that start enabled (the same list is available in game with **F2**), plus the gamepad button or
-two-button combo that opens the cheat menu. Details: [`PLAYING.md`](PLAYING.md#cheat-menu-f2).
+two-button combo that opens the cheat menu. Details: [`PLAYING.md`](PLAYING.md#cheat-menu-f2). What you change inside the game (these cheats, the overlay lines, the image
+adjustments) is read back when the game ends, so these tabs always show what the last session left
+([`PLAYING.md`](PLAYING.md#settings-that-follow-you)).
 
 ### Achievements
 
@@ -190,7 +192,11 @@ configured.
 
 1. The files are checked again (runner executable, ELF present, CRC).
 2. The game starts as `<gow-2005> <SCUS_973.99>` with the settings translated into environment variables, with its
-   stdout and stderr going to `logs/last.log`.
+   stdout and stderr going to `logs/last.log`. Among them, always `GOW_NATIVE_CHEATS_MENU=1`: the **Port Options** entry
+   of the game's own pause menu, with **Cheats**, **In Game Overlay** and **Image Adjustments** inside (the overlay page switches the
+   Performance tab's FPS, GPU, CPU and RAM lines on and off during the session, the image page moves its brightness, contrast, gamma and
+   saturation sliders; neither is saved back to the launcher; the game leaves its stock menu alone under RetroAchievements Hardcore
+   or with other game data; a `GOW_NATIVE_CHEATS_MENU=0` already in your environment turns it off).
 3. The launcher can minimize itself and reappears when the game exits.
 4. On exit you get the session length, or an error with the last lines of the log and a button to open it.
 

@@ -78,6 +78,22 @@ namespace
             runtime.replaceFunction(0x00116EF0u, gowDiagController);
         if (std::getenv("GOW_BLEND_DIAG"))
             runtime.replaceFunction(0x00110E40u, gowDiagBlend);
+        // GOW-Port: observers of the original UI (HUD object, message bank, Flash movies); read-only, always call the original.
+        const char *menuDiag = std::getenv("GOW_MENU_DIAG");
+        const char *menuExt = std::getenv("GOW_NATIVE_CHEATS_MENU");
+        if ((menuDiag && std::strcmp(menuDiag, "1") == 0) || (menuExt && std::strcmp(menuExt, "1") == 0))
+        {
+            runtime.replaceFunction(0x001B8A48u, gowDiagMenuMessages);
+            runtime.replaceFunction(0x001B9358u, gowDiagMenuShow);
+            runtime.replaceFunction(0x001B7CE0u, gowDiagMenuMovie);
+            if (menuExt && std::strcmp(menuExt, "1") == 0)
+            {
+                runtime.replaceFunction(0x0014AE68u, gowNativeMenuBuildMovie);
+                gowSetVBlankExtra(gowNativeMenuVBlank);
+            }
+            std::fprintf(stderr, "[gow-menu] observers on; the Options extension is %s\n",
+                         menuExt && std::strcmp(menuExt, "1") == 0 ? "installed (Port Options and Cheats in the pause menu, see docs/dev/NATIVE_MENU_RESEARCH.md)" : "not requested");
+        }
         if (std::getenv("GOW_HEAP_ZERO"))
             runtime.replaceFunction(0x0013DC78u, gowHeapZeroAlloc);
         if (std::getenv("GOW_SKEL_DIAG") || std::getenv("GOW_SKEL_OBJECT") || std::getenv("GOW_SKEL_ANIM"))
@@ -113,11 +129,15 @@ namespace
         if (const char *diag = std::getenv("GOW_LOADER_DIAG"); diag && std::strcmp(diag, "1") == 0)
             gowLoaderDiagInstall(runtime);
         // game logic rate (gow_logic_rate.cpp): PC_LOGIC_FPS > 60 paces the frame at N Hz, off by default
-        const int logicFps = gowLogicFps();
+        // bound whenever the menus can change the FPS limit (GOW_NATIVE_CHEATS_MENU=1), not only when the game starts above 60: the
+        // wrappers run the original when the limit is 60
+        const char *frameMenu = std::getenv("GOW_NATIVE_CHEATS_MENU");
+        const bool frameMenuOn = frameMenu && std::strcmp(frameMenu, "1") == 0;
+        const int logicFps = frameMenuOn ? std::max(gowLogicFps(), 120) : gowLogicFps();
         if (logicFps > 60)
         {
             runtime.replaceFunction(0x0017A1D0u, gowLogicFrameWait); // frame end's VBlank wait
-            std::fprintf(stderr, "[gow-hfps] game logic at %d Hz (experimental, PC_LOGIC_FPS)\n", logicFps);
+            std::fprintf(stderr, "[gow-hfps] game logic at %d Hz (experimental, PC_LOGIC_FPS)\n", gowLogicFps());
         }
         if (const char *diag = std::getenv("GOW_HFPS_DIAG"); logicFps > 60 || (diag && std::strcmp(diag, "1") == 0))
             runtime.replaceFunction(0x0017D778u, gowLogicTimeStep); // per-frame time step

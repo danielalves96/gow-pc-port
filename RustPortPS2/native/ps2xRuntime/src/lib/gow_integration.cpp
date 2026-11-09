@@ -37,6 +37,12 @@
 #include <vector>
 #include "gow_aspect.h" // GOW-Port: PC_ASPECT / PC_WIDESCREEN parsing (testable without the game)
 #include "gow_osd.inl" // GOW-Port: MSI Afterburner-style performance OSD (GS FPS, GPU, CPU, RAM)
+#include "gow_overlay.h" // GOW-Port: live switches of that OSD for the pause menu
+#include "gow_persist.h" // GOW-Port: what the player changes in game goes back to the launcher
+#include "gow_cheats.h"
+#include "gow_image.h"
+#include "gow_frame.h"
+#include "gow_quality.h"
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
@@ -153,6 +159,18 @@ void gowRetroAchievementsDraw();
 void gowSamplingStart(); // gow_sampling.cpp (GOW_SAMPLING)
 void gowSamplingBurst(const char *path, double seconds, int intervalUs); // gow_sampling.cpp: synchronous sampling for a few seconds
 int gowLogicFps(); // GOW-Port: below (PC_LOGIC_FPS)
+bool gowEarlyFinishAvailable(); // GOW-Port: lib/ps2_memory.cpp (the Frame Rate page of the menus)
+bool gowEarlyFinishGet();
+void gowEarlyFinishSet(bool enabled);
+bool gowVsyncEnabled();
+int gowFilterGet(); // GOW-Port: lib/gs/gs_host_present.cpp (the upscaling settings of the Image Quality page)
+void gowFilterSet(int mode);
+int gowSharpnessGet();
+void gowSharpnessSet(int percent);
+int gowFxaaGet();
+void gowFxaaSet(int on);
+float gowGsScaleGet(); // lib/gs/gpu/gs_hw_backend.cpp (internal render scale, applied by the GS at its next draw)
+void gowGsScaleSet(float scale);
 
 namespace
 {
@@ -203,8 +221,15 @@ namespace
     // stays idle (buttons released, sticks centered, no pressure).
     void reapplyWidescreenAspect(uint8_t *rdram); // further below, next to the widescreen code
 
-    // GOW-Port: which parts of the OSD are shown (PC_SHOW_FPS, PC_SHOW_GPU, PC_SHOW_CPU, PC_SHOW_RAM; launcher).
-    gow_osd::Show g_osdShow{false, false, false, false};
+    // GOW-Port: which parts of the OSD are shown. The launcher sets the start state (PC_SHOW_FPS, PC_SHOW_GPU, PC_SHOW_CPU,
+    // PC_SHOW_RAM); the "In Game Overlay" page of the pause menu changes it live (gowOverlaySet, EE thread) while the render
+    // thread reads it. Bits: 1 FPS, 2 GPU, 4 CPU, 8 RAM.
+    std::atomic<unsigned> g_osdMask{0};
+    gow_osd::Show osdShow()
+    {
+        const unsigned m = g_osdMask.load(std::memory_order_relaxed);
+        return gow_osd::Show{(m & 1u) != 0u, (m & 2u) != 0u, (m & 4u) != 0u, (m & 8u) != 0u};
+    }
 
     // GOW-Port: game frames per second (PC_SHOW_FPS=1): entries to the frame function, 0x1837B8 (the one from
     // GOW_PERF_FRAME_PC). Resumes after a checkpoint (ctx->pc different from the entry) don't count.
@@ -284,14 +309,24 @@ namespace
         g_gameFrameFunction(rdram, ctx, runtime);
     }
 
-    void drawFps(float x, float y, float h, uint64_t presentedSequence, bool hasSharedFrame)
+    // `restart`: the OSD was hidden until this frame (the pause menu can switch it on mid-game), so the measuring window starts
+    // again instead of averaging over the whole time it was off; the FPS line waits for its first full second.
+    void drawFps(float x, float y, float h, uint64_t presentedSequence, bool hasSharedFrame, gow_osd::Show show, bool restart)
     {
         static double last = 0.0;
         static uint64_t framesBefore = 0;
         static uint64_t lastPresentedSequence = 0;
         static int gameFps = 0, newFps = 0, windowFps = 0;
         static int newCount = 0, windowCount = 0;
+        static bool measured = false;
         const double now = GetTime();
+        if (restart)
+        {
+            last = 0.0;
+            gameFps = newFps = windowFps = 0;
+            newCount = windowCount = 0;
+            measured = false;
+        }
         const uint64_t frames = g_gameFrames.load(std::memory_order_relaxed);
         ++windowCount;
         // GOW-Port: 1 % low: intervals between new GS frames (the last 600, ≈ 10 s); computed every second as the FPS that
@@ -345,12 +380,14 @@ namespace
             last = now;
             framesBefore = frames;
             newCount = windowCount = 0;
+            measured = true;
         }
         // GOW-Port: the OSD shows one frame rate, the real one: the game's own frames per second (entries to its frame
         // function, which follow the launcher's FPS limit, PC_LOGIC_FPS), plus GPU, CPU and RAM when the system gives them.
         // The new pictures on screen (newFps), the window refresh (windowFps, the monitor's rate) and the 1 % low stay in
         // the [gow-osd] log line only.
-        gow_osd::draw(x, y, h, gameFps, -1, -1, -1, g_osdShow);
+        show.fps = show.fps && measured; // never a made-up 0 while the first second is still being counted
+        gow_osd::draw(x, y, h, gameFps, -1, -1, -1, show);
     }
     constexpr uint32_t kGowPad2Read = 0x0027B9F0u;
     PS2Runtime::RecompiledFunction g_gowPad2Read = nullptr;
@@ -484,11 +521,20 @@ namespace
     }
 }
 
+// GOW-Port: one extra EE-thread callback per VBlank for the game overrides (src/game), registered at startup.
+static void (*g_vblankExtra)(uint8_t *) = nullptr;
+void gowSetVBlankExtra(void (*callback)(uint8_t *rdram))
+{
+    g_vblankExtra = callback;
+}
+
 // GOW-Port: Kernel/EeScheduler.cpp, at the start of every VBlank and when the scheduler restarts.
 void gowIntegrationVBlank(uint8_t *rdram)
 {
     gowWidescreenVBlank(rdram);
     gowCheatsVBlank(rdram);
+    if (g_vblankExtra)
+        g_vblankExtra(rdram);
     gowRetroAchievementsVBlank(rdram);
 }
 
@@ -572,25 +618,168 @@ int gowWindowFps()
 // GOW-Port: game logic rate (PC_LOGIC_FPS, experimental and off by default; src/game/gow_logic_rate.cpp). 60 unless
 // the value is one of the supported rates and the 30 FPS cap (PC_GAME_FPS=30) is off. Read by the overrides and by the
 // scheduler's pacing (Kernel/EeScheduler.cpp).
+namespace
+{
+    // The logic rate as the launcher started it (PC_LOGIC_FPS) and as the Frame Rate page of the menus left it.
+    int startingLogicFps()
+    {
+        static const int fps = [] {
+            const long requested = envLong("PC_LOGIC_FPS", 60, 0, 1000);
+            if (requested == 60)
+                return 60;
+            if (requested != 120 && requested != 144 && requested != 165 && requested != 240)
+            {
+                std::fprintf(stderr, "[gow-hfps] PC_LOGIC_FPS=%ld is not supported (120, 144, 165, 240): 60\n", requested);
+                return 60;
+            }
+            if (envLong("PC_GAME_FPS", 60, 30, 60) <= 30)
+            {
+                std::fprintf(stderr, "[gow-hfps] PC_LOGIC_FPS=%ld ignored with PC_GAME_FPS=30: 60\n", requested);
+                return 60;
+            }
+            return static_cast<int>(requested);
+        }();
+        return fps;
+    }
+    std::atomic<int> g_logicFps{0}; // 0 = not read yet
+}
+
+// GOW-Port: game logic rate (PC_LOGIC_FPS, experimental; src/game/gow_logic_rate.cpp). 60 unless the value is one of the supported
+// rates and the 30 FPS cap (PC_GAME_FPS=30) is off. Read by the overrides, the scheduler's pacing (Kernel/EeScheduler.cpp) and the
+// presentation; the Frame Rate page of the menus changes it while the game runs (gowFrameSet), so none of them caches it.
 int gowLogicFps()
 {
-    static const int fps = [] {
-        const long requested = envLong("PC_LOGIC_FPS", 60, 0, 1000);
-        if (requested == 60)
-            return 60;
-        if (requested != 120 && requested != 144 && requested != 165 && requested != 240)
-        {
-            std::fprintf(stderr, "[gow-hfps] PC_LOGIC_FPS=%ld is not supported (120, 144, 165, 240): 60\n", requested);
-            return 60;
-        }
-        if (envLong("PC_GAME_FPS", 60, 30, 60) <= 30)
-        {
-            std::fprintf(stderr, "[gow-hfps] PC_LOGIC_FPS=%ld ignored with PC_GAME_FPS=30: 60\n", requested);
-            return 60;
-        }
-        return static_cast<int>(requested);
-    }();
+    int fps = g_logicFps.load(std::memory_order_relaxed);
+    if (fps == 0)
+    {
+        fps = startingLogicFps();
+        int expected = 0;
+        g_logicFps.compare_exchange_strong(expected, fps);
+        fps = g_logicFps.load(std::memory_order_relaxed);
+    }
     return fps;
+}
+
+// GOW-Port: the minimum time between two new frames in the window (gs_gl.cpp). The launcher sets GOW_PRESENT_MIN_INTERVAL_US to 80 %
+// of a frame at its FPS limit (800000 / fps); when that is the value in the environment, the interval follows the limit the menu
+// chooses (gowPresentMinIntervalSet), a value anyone else set (diagnostics) is kept as it is.
+void gowPresentMinIntervalSet(long microseconds); // lib/gs/gpu/gs_gl.cpp
+static void followPresentInterval(int fps)
+{
+    static const char *const text = std::getenv("GOW_PRESENT_MIN_INTERVAL_US");
+    static const bool followsTheLimit = text && std::strtol(text, nullptr, 10) == 800000L / startingLogicFps();
+    if (followsTheLimit)
+        gowPresentMinIntervalSet(800000L / fps);
+}
+
+// GOW-Port: window VSync, switched by the menus (ps2_runtime.cpp asks it for the pacing mode, gowFrameInput applies it to the window).
+namespace
+{
+    std::atomic<bool> g_vsyncWanted{false};
+    std::atomic<bool> g_vsyncApplied{false};
+    std::atomic<bool> g_vsyncStarted{false};
+}
+
+bool gowVsyncEnabled()
+{
+    if (!g_vsyncStarted.load(std::memory_order_acquire))
+    {
+        g_vsyncWanted.store(envFlag("PC_VSYNC", false));
+        g_vsyncApplied.store(g_vsyncWanted.load());
+        g_vsyncStarted.store(true, std::memory_order_release);
+    }
+    return g_vsyncWanted.load(std::memory_order_relaxed);
+}
+
+int gowFrameCount()
+{
+    return 3;
+}
+
+bool gowFrameAvailable(int index)
+{
+    if (index == 0)
+        return envLong("PC_GAME_FPS", 60, 30, 60) > 30;
+    if (index == 2)
+        return gowEarlyFinishAvailable();
+    return index == 1;
+}
+
+int gowFrameGet(int index)
+{
+    if (index == 0)
+        return gowLogicFps() <= 90 ? 0 : (gowLogicFps() <= 180 ? 1 : 2);
+    if (index == 1)
+        return gowVsyncEnabled() ? 1 : 0;
+    if (index == 2)
+        return gowEarlyFinishGet() ? 1 : 0;
+    return 0;
+}
+
+void gowFrameSet(int index, int value)
+{
+    if (!gowFrameAvailable(index))
+        return;
+    if (index == 0)
+    {
+        static const int rates[3] = {60, 120, 240};
+        const int next = rates[std::clamp(value, 0, 2)];
+        if (gowLogicFps() != next)
+        {
+            g_logicFps.store(next, std::memory_order_relaxed);
+            followPresentInterval(next);
+            std::fprintf(stderr, "[gow-hfps] FPS limit %d (changed in game)\n", next);
+            gowPersistTouch();
+        }
+    }
+    else if (index == 1)
+    {
+        if (gowVsyncEnabled() != (value != 0))
+        {
+            g_vsyncWanted.store(value != 0, std::memory_order_relaxed); // applied by the window loop (gowFrameInput)
+            gowPersistTouch();
+        }
+    }
+    else if (index == 2)
+    {
+        if (gowEarlyFinishGet() != (value != 0))
+        {
+            gowEarlyFinishSet(value != 0);
+            gowPersistTouch();
+        }
+    }
+}
+
+int gowQualityCount()
+{
+    return 4;
+}
+
+int gowQualityGet(int index)
+{
+    switch (index)
+    {
+    case 0: return std::clamp(static_cast<int>(std::lround(gowGsScaleGet())) - 1, 0, 7);
+    case 1: return gowFilterGet();
+    case 2: return gowSharpnessGet();
+    case 3: return gowFxaaGet();
+    default: return 0;
+    }
+}
+
+void gowQualitySet(int index, int value)
+{
+    const int before = gowQualityGet(index);
+    switch (index)
+    {
+    case 0: gowGsScaleSet(static_cast<float>(std::clamp(value, 0, 7) + 1)); break;
+    case 1: gowFilterSet(value); break;
+    case 2: gowSharpnessSet(value); break;
+    case 3: gowFxaaSet(value); break;
+    default: return;
+    }
+    if (gowQualityGet(index) != before || index == 0)
+        gowPersistTouch(); // the launcher keeps it for the next session
 }
 
 // GOW-Port: game buffer swaps (the display setup 0x183360 after it handed the new DISPFB to the presentation; called by
@@ -720,9 +909,13 @@ void gowIntegrationInstall(PS2Runtime &runtime, const std::string &elfPath)
     // (FPS switch only) keeps GPU, CPU and RAM. The current launcher sends 0 or 1 for each part.
     {
         const bool fps = envFlag("PC_SHOW_FPS", false);
-        g_osdShow = {fps, envFlag("PC_SHOW_GPU", fps), envFlag("PC_SHOW_CPU", fps), envFlag("PC_SHOW_RAM", fps)};
+        g_osdMask.store((fps ? 1u : 0u) | (envFlag("PC_SHOW_GPU", fps) ? 2u : 0u) | (envFlag("PC_SHOW_CPU", fps) ? 4u : 0u) |
+                        (envFlag("PC_SHOW_RAM", fps) ? 8u : 0u));
     }
-    if ((g_gameFrameLimit == 30 || g_osdShow.any()) && runtime.hasFunction(kGameFrameFunction))
+    // GOW-Port: with the native pause menu (GOW_NATIVE_CHEATS_MENU=1, which the launcher always sets) the frame counter is
+    // always installed: the "In Game Overlay" page can switch the FPS counter on in the middle of a session. The hook costs one
+    // relaxed atomic increment per game frame.
+    if ((g_gameFrameLimit == 30 || osdShow().any() || envFlag("GOW_NATIVE_CHEATS_MENU", false)) && runtime.hasFunction(kGameFrameFunction))
         if (PS2Runtime::RecompiledFunction actual = runtime.lookupFunction(kGameFrameFunction))
         {
             g_gameFrameFunction = actual;
@@ -850,10 +1043,29 @@ void gowIntegrationInstall(PS2Runtime &runtime, const std::string &elfPath)
 }
 
 // GOW-Port: ps2_runtime.cpp (window loop), before drawing every frame.
+bool gowHostSyncToVBlank(); // GOW-Port: lib/ps2_runtime.cpp
+
+// GOW-Port: window loop (render thread): applies the VSync the menus asked for, and the window pacing that goes with it (with VSync
+// the display paces the loop, without it the game's VBlank does: ps2_runtime.cpp).
+static void gowApplyFrameSettings()
+{
+    const bool wanted = gowVsyncEnabled();
+    if (wanted == g_vsyncApplied.load(std::memory_order_relaxed))
+        return;
+    g_vsyncApplied.store(wanted, std::memory_order_relaxed);
+    if (wanted)
+        SetWindowState(FLAG_VSYNC_HINT);
+    else
+        ClearWindowState(FLAG_VSYNC_HINT);
+    SetTargetFPS(gowHostSyncToVBlank() ? 0 : gowWindowFps());
+    std::fprintf(stderr, "[gow-frame] VSync %s (changed in game)\n", wanted ? "on" : "off");
+}
+
 void gowFrameInput()
 {
     if (IsKeyPressed(KEY_F11))
         toggleFullscreen();
+    gowApplyFrameSettings();             // the VSync chosen in the menus
     gowPadDiagFrame();                   // GOW_PAD_DIAG: what GLFW and raylib see of the joysticks
     gowCheatsMenuInput(escClosesGame()); // F2, cheat menu
     gowTargetingInput();                     // Alt locks the target, the mouse switches it
@@ -865,6 +1077,134 @@ void gowFrameDraw(float x, float y, float w, float h, uint64_t presentedSequence
     gowTargetingDraw(x, y, w, h);
     gowCheatsMenuDraw();
     gowRetroAchievementsDraw();
-    if (g_gameFrameFunction && g_osdShow.any()) // GOW-Port: a 30 FPS limit installs the hook without asking for the OSD
-        drawFps(x, y, h, presentedSequence, hasSharedFrame);
+    // GOW-Port: a 30 FPS limit (or the native menu) installs the hook without the OSD being on
+    static bool osdWasShown = false;
+    const gow_osd::Show show = osdShow();
+    if (g_gameFrameFunction && show.any())
+    {
+        drawFps(x, y, h, presentedSequence, hasSharedFrame, show, !osdWasShown);
+        osdWasShown = true;
+    }
+    else
+        osdWasShown = false;
+}
+
+// GOW-Port: gow_overlay.h, for the "In Game Overlay" page of the pause menu.
+int gowOverlayCount()
+{
+    return 4;
+}
+
+bool gowOverlayGet(int index)
+{
+    return index >= 0 && index < 4 && ((g_osdMask.load(std::memory_order_relaxed) >> index) & 1u) != 0u;
+}
+
+void gowOverlaySet(int index, bool shown)
+{
+    if (index < 0 || index >= 4)
+        return;
+    const unsigned bit = 1u << index;
+    const unsigned before = shown ? g_osdMask.fetch_or(bit, std::memory_order_relaxed) : g_osdMask.fetch_and(~bit, std::memory_order_relaxed);
+    if (((before & bit) != 0u) != shown)
+        gowPersistTouch();
+}
+
+// GOW-Port: what the player changes inside the game (cheats: F2 menu and Port Options pages; overlay lines; image adjustments) is
+// written to the file named by GOW_INGAME_STATE (the launcher sets it, and reads the file when the game ends: gow-core/src/ingame.rs).
+// A change only marks the state dirty; a thread writes the file once the changes have been quiet for 0.4 s (a slider held down
+// changes the value ten times a second), and a last write runs at exit. Without the variable nothing is written.
+namespace
+{
+    std::atomic<bool> g_persistDirty{false};
+    std::atomic<long long> g_persistTouchedMs{0};
+    std::mutex g_persistWrite;
+
+    long long persistNowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    const std::string &persistPath()
+    {
+        static const std::string path = [] {
+            const char *v = std::getenv("GOW_INGAME_STATE");
+            return std::string(v ? v : "");
+        }();
+        return path;
+    }
+
+    void persistWriteFile()
+    {
+        const std::lock_guard<std::mutex> lock(g_persistWrite);
+        std::string json = "{\"version\":1";
+        if (gowCheatsAvailable()) // under Hardcore the cheat list is not sent at all
+        {
+            std::string list;
+            for (int i = 0; i < gowCheatsCount(); ++i)
+                if (gowCheatsGet(i))
+                    list += std::string(list.empty() ? "" : ",") + gowCheatsId(i);
+            json += ",\"cheats\":\"" + list + "\"";
+        }
+        static const char *const keys[4] = {"showFps", "showGpu", "showCpu", "showRam"};
+        for (int i = 0; i < 4; ++i)
+            json += std::string(",\"") + keys[i] + "\":" + (gowOverlayGet(i) ? "true" : "false");
+        static const char *const image[4] = {"brightness", "contrast", "gamma", "saturation"};
+        for (int i = 0; i < 4; ++i)
+            json += std::string(",\"") + image[i] + "\":" + std::to_string(gowImageGet(i));
+        static const int limits[3] = {60, 120, 240};
+        json += std::string(",\"fpsLimit\":") + std::to_string(limits[std::clamp(gowFrameGet(0), 0, 2)]);
+        json += std::string(",\"vsync\":") + (gowFrameGet(1) ? "true" : "false");
+        if (gowFrameAvailable(2))
+            json += std::string(",\"earlyFinish\":") + (gowFrameGet(2) ? "true" : "false");
+        json += std::string(",\"internalResolution\":\"") + std::to_string(gowQualityGet(0) + 1) + "\"";
+        static const char *const filters[3] = {"fsr", "bilinear", "pixel"};
+        json += std::string(",\"filter\":\"") + filters[std::clamp(gowQualityGet(1), 0, 2)] + "\"";
+        json += std::string(",\"sharpness\":") + std::to_string(gowQualityGet(2) / 100.0);
+        json += std::string(",\"fxaa\":") + (gowQualityGet(3) ? "true" : "false");
+        json += "}\n";
+        const std::string &path = persistPath();
+        const std::string temporary = path + ".tmp";
+        if (std::FILE *f = std::fopen(temporary.c_str(), "wb"))
+        {
+            const bool ok = std::fwrite(json.data(), 1, json.size(), f) == json.size();
+            std::fclose(f);
+            std::remove(path.c_str()); // rename does not replace an existing file on every platform
+            if (!ok || std::rename(temporary.c_str(), path.c_str()) != 0)
+                std::fprintf(stderr, "[gow-persist] could not write %s\n", path.c_str());
+            else if (std::getenv("GOW_PERSIST_DIAG"))
+                std::fprintf(stderr, "[gow-persist] wrote %s: %s", path.c_str(), json.c_str());
+        }
+        else
+            std::fprintf(stderr, "[gow-persist] could not open %s\n", temporary.c_str());
+    }
+
+    void persistThread()
+    {
+        for (;;)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (g_persistDirty.load(std::memory_order_acquire) && persistNowMs() - g_persistTouchedMs.load(std::memory_order_relaxed) >= 400)
+            {
+                g_persistDirty.store(false, std::memory_order_release);
+                persistWriteFile();
+            }
+        }
+    }
+}
+
+void gowPersistTouch()
+{
+    if (persistPath().empty())
+        return;
+    g_persistTouchedMs.store(persistNowMs(), std::memory_order_relaxed);
+    g_persistDirty.store(true, std::memory_order_release);
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::thread(persistThread).detach();
+        std::atexit([] {
+            if (g_persistDirty.exchange(false))
+                persistWriteFile();
+        });
+    });
 }

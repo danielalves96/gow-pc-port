@@ -64,8 +64,7 @@ namespace
     // pacing points get as many per field as N/60 to keep ~1 ms of resolution per logic frame.
     uint64_t paceSteps()
     {
-        static const uint64_t steps = kPaceSteps * static_cast<uint64_t>(std::max(60, gowLogicFps())) / 60u;
-        return steps;
+        return kPaceSteps * static_cast<uint64_t>(std::max(60, gowLogicFps())) / 60u; // the FPS limit can change in game
     }
 
     template <typename Map>

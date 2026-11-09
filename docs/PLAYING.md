@@ -62,8 +62,58 @@ The cheats (the same list appears under **Cheats** in the launcher, where you ch
 | Max health and magic | Every Gorgon Eye and Phoenix Feather already applied |
 | Unlock all extras | God Mode difficulty, costumes, videos and Challenge of the Gods |
 
-Changes made inside the menu are **not** written back to the launcher: the list there is what starts enabled next time.
-`unlock_extras` is the exception: once you save, the unlock stays on the memory card.
+What you change in game is **kept for the next session**: when the game ends the launcher takes the cheats you left on, and its
+settings (the **Cheats** list, the Performance tab, the Shade Boost sliders) show them from then on, so the next time you play the
+game starts with them (see [Settings that follow you](#settings-that-follow-you)). `unlock_extras` also stays on the memory card once
+you save.
+
+**Port options in the game's own menus.** When the game is started from the launcher, the pause menu (Select) has one more
+entry, **Port Options**, right below Options, and so does the title menu (after Press Start): **Port Options** comes after Treasures,
+the last of the items you scroll through with up and down (started by hand it needs the environment variable
+`GOW_NATIVE_CHEATS_MENU=1`, and `GOW_NATIVE_CHEATS_MENU=0` turns it off for a launcher session). Both open the same list of the
+features of this port, with five items, and they work on the same switches:
+
+- **Cheats** opens a screen with the same nine cheats as the F2 menu (← → or ✕ turn the highlighted one on or off) and **Back**.
+  Each is the same switch as in the F2 menu, so changing one changes the other.
+- **In Game Overlay** opens a screen with one ON/OFF row for each part of the performance overlay: **FPS Counter**, **GPU Stats**
+  (usage, temperature, video memory), **CPU Stats** (usage, clock) and **RAM Usage** (what the game itself occupies). The
+  launcher's Performance tab decides what starts on; the menu changes it on the spot and the launcher keeps what you left (see
+  [Settings that follow you](#settings-that-follow-you)). Whatever the system cannot report is simply not drawn.
+- **Image Adjustments** opens a screen with four sliders, **Brightness**, **Contrast**, **Gamma** and **Saturation**, like the game's
+  own volume bars (← → change the value by 2 %, from 0 to 100, the middle being the unchanged picture; hold the direction and it
+  repeats, after a short delay, ten steps a second; the bar has 11 positions, so it moves every fifth step while the picture changes
+  with each one), and **Reset to Default**, which puts the four back in the
+  middle. They are the launcher's Shade Boost settings: the Performance tab decides where they start, the menu changes them on the
+  spot, the picture, menu included, follows as you move, and the launcher keeps the values you left.
+- **Image Quality** opens a screen with the launcher's **Image quality** settings: **Resolution** (1x to 8x the native size, the
+  internal render scale), **Upscaling** (Bicubic, Bilinear or Pixel), **Sharpness** (a slider, in steps of 5 %, for the bicubic
+  filter) and **FXAA** (ON/OFF). They take effect on the spot: the render targets are rebuilt at the new resolution with the current
+  picture copied into them (a moment of softness at 8x is normal: it is heavy for the graphics card), and the window scaling changes
+  with the next frame. Without Bicubic, Sharpness does nothing. The graphics preset and the progressive scan (480p) switch of the
+  launcher are not in the menu: changing the video mode while playing reloads the GS and corrupts the models' textures, so progressive
+  scan stays a launcher setting that applies when the game starts.
+- **Frame Rate** opens a screen with the launcher's **Frame rate** settings: **FPS Limit** (60, 120 or 240; ← → or ✕ go through the three
+  values), **VSync** and **Early FINISH** (ON/OFF). They take effect on the spot: the game logic changes to the new rate, the window
+  switches VSync, and Early FINISH is switched once the GS worker has finished what it was drawing. 120 and 240 are experimental, as
+  in the launcher; with the game's 30 FPS mode (`PC_GAME_FPS=30`) the limit row does nothing, and without the GS worker Early FINISH
+  does nothing. The values are kept for the next session like the others.
+
+The Options menu itself is the original one. It works with the retail USA game only, and none of this appears while
+RetroAchievements Hardcore is on (the launcher's switches still work then). Back and Triangle return one level. Developer details: `docs/dev/NATIVE_MENU_RESEARCH.md`.
+
+## Settings that follow you
+
+The cheats (F2 menu and Port Options), the performance overlay lines, the four image adjustments, the image quality (resolution,
+upscaling, sharpness, FXAA) and the frame rate (FPS limit, VSync, Early FINISH) are saved when you change them
+inside the game: a moment after each change the game writes them to a small file in the launcher's data folder, and the launcher
+reads it when the game ends (or the next time you press Play, if it was closed meanwhile) and updates its own settings. The
+launcher's Cheats and Performance tabs then show what you left, and the next session starts with it. Nothing else of the settings
+is touched. Notes:
+
+- It needs the game started **from the launcher**; a game started by hand (no `GOW_INGAME_STATE` in the environment) saves nothing.
+- If you also change those settings in the launcher while the game is running, what you set in the game wins when the game ends.
+- With RetroAchievements **Hardcore** the cheats are never saved (there are none in that mode); the overlay and the image still are.
+- **Reset** in the launcher's settings, and its Cheats tab, still work as before: they edit the same values.
 
 ## Target lock (Alt)
 

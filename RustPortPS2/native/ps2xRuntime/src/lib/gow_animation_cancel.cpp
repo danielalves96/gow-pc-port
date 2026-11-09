@@ -463,7 +463,20 @@ namespace
         {
             adjustQueue(rdram, c);
             if (g_buffer)
-                applyBuffer(rdram, buffer, c, t);
+            {
+                // GOW-Port: the buffer is for gameplay only. In the pause menu (game state 12) nothing "accepts" a Triangle, so
+                // it kept pressing it again and one tap went back several menu levels (Options, pause menu, game).
+                if (read32(rdram, 0x0029E560u) == 11u)
+                    applyBuffer(rdram, buffer, c, t);
+                else
+                {
+                    g_pending[0] = {};
+                    g_pending[1] = {};
+                    uint16_t buttons = 0xFFFFu;
+                    std::memcpy(&buttons, rdram + buffer, 2);
+                    g_previous = static_cast<uint16_t>(~buttons);
+                }
+            }
         }
         if (g_diag)
             diagQueue(rdram, c);

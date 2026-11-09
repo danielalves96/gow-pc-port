@@ -17,6 +17,8 @@
 //     drives the extras, costumes and God Mode difficulty (0x1BA9B8, 0x22F4B0). Saved to the memory card.
 //   0x1E0A80  sets a creature's health (a0, f12; clamps it between 0 and max). 0x1E0A98 subtracts damage (a0, f12)
 //     and signals the thresholds it crosses (boss phases); ends up calling 0x1E0A80.
+#include "gow_cheats.h"
+#include "gow_persist.h" // GOW-Port: a change is written back for the launcher
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "raylib.h"
@@ -508,11 +510,16 @@ namespace
         return g;
     }
 
-    void toggle(int index)
+    void setActive(int index, bool next)
     {
-        const bool next = !g_active[index].load(std::memory_order_relaxed);
         g_active[index].store(next, std::memory_order_relaxed);
         std::cerr << "[cheats] " << kIds[index] << (next ? " active" : " disabled") << std::endl;
+        gowPersistTouch(); // GOW-Port: the launcher keeps the list for the next session
+    }
+
+    void toggle(int index)
+    {
+        setActive(index, !g_active[index].load(std::memory_order_relaxed));
     }
 
     void open(bool escClosesGame)
@@ -582,6 +589,37 @@ void gowCheatsInstall(PS2Runtime &runtime, const std::string &elfPath)
     std::cerr << "[cheats] cheat menu ready (F2"
               << (g_trigger.first.gamepad ? " + gamepad shortcut" : "") << "); active: "
               << (activeList.empty() ? "none" : activeList) << std::endl;
+}
+
+// GOW-Port: public interface (gow_cheats.h). It shares the state of the F2 menu and honors the same availability
+// rule: g_installed stays false under RetroAchievements Hardcore, so nothing here can change a cheat in that mode.
+bool gowCheatsAvailable()
+{
+    return g_installed.load(std::memory_order_acquire);
+}
+
+int gowCheatsCount()
+{
+    return kNumCheats;
+}
+
+const char *gowCheatsId(int index)
+{
+    return index >= 0 && index < kNumCheats ? kIds[index] : nullptr;
+}
+
+bool gowCheatsGet(int index)
+{
+    return gowCheatsAvailable() && index >= 0 && index < kNumCheats && active(static_cast<Cheat>(index));
+}
+
+bool gowCheatsSet(int index, bool enabled)
+{
+    if (!gowCheatsAvailable() || index < 0 || index >= kNumCheats)
+        return false;
+    if (active(static_cast<Cheat>(index)) != enabled)
+        setActive(index, enabled);
+    return true;
 }
 
 // EE thread, at the start of every VBlank: values that are kept while the cheat is active.

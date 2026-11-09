@@ -55,6 +55,14 @@ impl AppState {
         settings.clone()
     }
 
+    /// Like `update`, but the file is written (and the UI told by the caller) only when `change` says it changed something.
+    fn update_if(&self, change: impl FnOnce(&mut Settings) -> bool) {
+        let mut settings = self.settings.lock().unwrap();
+        if change(&mut settings) {
+            let _ = settings.save(&self.paths.settings_file());
+        }
+    }
+
     fn snapshot(&self) -> Settings {
         self.settings.lock().unwrap().clone()
     }
@@ -237,6 +245,9 @@ fn start_game(app: AppHandle, window: WebviewWindow, state: State<'_, AppState>)
     }
     // If a rebuild finished since last time, the active copy of the executable is updated before opening.
     state.optimizer.prepare_to_play();
+    // What the player changed inside the game last time and the launcher did not get to read (it was closed meanwhile).
+    let ingame_state = state.paths.ingame_state_file();
+    state.update_if(|s| gow_core::ingame::consume(s, &ingame_state));
     let settings = state.snapshot();
     // GOW-Port: the instrumented training build of an interrupted "Optimize now" is several times slower than the game: it is
     // never opened (the interface explains it and the optimizer rebuilds the game by itself).
@@ -253,9 +264,12 @@ fn start_game(app: AppHandle, window: WebviewWindow, state: State<'_, AppState>)
         let state = finished_app.state::<AppState>();
         *state.game.lock().unwrap() = None;
         session::session_ended(&state.paths, started_at, &finished, report::unix_now());
+        let ingame_state = state.paths.ingame_state_file();
         let updated = state.update(|s| {
             s.seconds_played += finished.seconds;
             s.last_session = finished.seconds;
+            // the cheats, overlay lines and image adjustments the player set inside the game start the next session
+            gow_core::ingame::consume(s, &ingame_state);
         });
         state.optimizer.game_state_changed(false);
         if let Some(window) = finished_app.get_webview_window("main") {

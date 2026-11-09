@@ -17,8 +17,10 @@ manually:
 
 ```
 PS2X_GS_WORKER=1 GOW_GS_FINISH_ASYNC=1 GOW_AUDIO_DEVICE=default
-GOW_PERF_DIAG=1 GOW_PERF_FRAME_PC=0x001837B8
+GOW_PERF_DIAG=1 GOW_PERF_FRAME_PC=0x001837B8 GOW_NATIVE_CHEATS_MENU=1
 ```
+
+(`GOW_NATIVE_CHEATS_MENU=0` in your environment turns the Port Options pause-menu entry off: a variable you already set is respected.)
 
 plus, from the settings: `PC_SCREEN`, `PC_WIDTH`, `PC_HEIGHT`, `PC_TITLE`, `PC_PANEL=0`, `PC_ICON`, `PC_ASPECT`,
 `PC_WIDESCREEN`, `PC_FILTER`, `GOW_SHARPEN`, `PC_FXAA`, `GOW_PROGRESSIVE`, `GOW_SCALER`,
@@ -44,7 +46,7 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 | `PS2X_GS_FAIL_TEST=context\|shaders` | Test only: `GSHwBackend::ensure()` fails on purpose before touching GL, to see the on-screen renderer-failure message (English, or Portuguese when `PC_LANGUAGE` starts with `pt`); `GOW_HOST_SHOT=<frame>` writes `host_shot.png` |
 | `PS2X_GS_GL_MAX_MINOR=<3..6>` | Test only: the GS context ladder starts at OpenGL 4.<n> instead of 4.6 (then falls down to 4.3), to exercise the 4.3 path on a newer GPU. `[gs-gl]` in the log reports the version obtained |
 | `GOW_PRESENT_BLOCKING`, `GOW_PRESENT_FIFO`, `GOW_PRESENT_MIN_INTERVAL_US` | Presentation pacing |
-| `PC_GAME_FPS`, `PC_WINDOW_FPS`, `PC_VSYNC`, `PC_SHOW_FPS`, `PC_SHOW_GPU`, `PC_SHOW_CPU`, `PC_SHOW_RAM` | Limits, vsync, overlay lines (`PC_WINDOW_FPS` = the display's refresh rate, set by the launcher) |
+| `PC_GAME_FPS`, `PC_WINDOW_FPS`, `PC_VSYNC`, `PC_SHOW_FPS`, `PC_SHOW_GPU`, `PC_SHOW_CPU`, `PC_SHOW_RAM` | Limits, vsync, overlay lines (`PC_WINDOW_FPS` = the display's refresh rate, set by the launcher). The four `PC_SHOW_*` only set the state at start: with `GOW_NATIVE_CHEATS_MENU=1` the pause menu's **In Game Overlay** page flips each line live (`gow_overlay.h`), and the frame counter hook is then always installed |
 | `PC_LOGIC_FPS=<120\|144\|165\|240>` | Experimental game logic rate (`src/game/gow_logic_rate.cpp`): the frame end waits for 1/N s slots of guest time instead of 60 Hz VBlanks, the time step floor becomes 60/N fields, and the window latches a new picture on each game buffer swap. Unset or 60 = the game's own 60 Hz. The launcher's FPS limit sets it (120, 240). Ignored with `PC_GAME_FPS=30` |
 | `GOW_HFPS_DIAG=1` | `[gow-hfps]` every 5 s: time step (ticks, fields, delta), fixed-step frames, N Hz waits, late frames and 60 Hz fallbacks, `game_s/host_s` |
 | `PC_PROGRESSIVE` / `GOW_PROGRESSIVE` | 480p progressive mode |
@@ -109,6 +111,11 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 | `GOW_AUDIO_STATS=1`, `GOW_IOP_DRIFT=1`, `GOW_SND_REGLOG=1`, `GOW_SND_DIAG=1` | Sound: frame counts, IOP drift, register writes |
 | `GOW_SND_VOICE_DIAG=1` | Sound: `[gow-voices]` every 5 s with the SPU2 voices taken, in release and stuck in release |
 | `GOW_MPEG_DIAG=1`, `GOW_MPEG_PACE`, `GOW_MOVIE_OVERRIDE` | Movie playback and A/V sync |
+| `GOW_MENU_DIAG=1` | Read-only observers of the original UI (HUD object, message bank, Flash movies; `[gow-menu]`, at most 64 samples each) |
+| `GOW_NATIVE_CHEATS_MENU=1` | Adds **Port Options** to the original pause menu (below Options) and to the title menu (after Treasures): a list with **Cheats** (a screen with the nine cheats of the F2 menu, each ON/OFF, shared with it) **In Game Overlay** (a screen with the FPS, GPU, CPU and RAM lines of the performance overlay, each ON/OFF, session only) and **Image Adjustments** (sliders for the Shade Boost: `PC_BRIGHTNESS`, `PC_CONTRAST`, `PC_GAMMA`, `PC_SATURATION` give the start values, the page changes them live, session only; the scaler shader is then always loaded); needs the retail `FLP_HUD`, off under RetroAchievements Hardcore. Opt-in. See `NATIVE_MENU_RESEARCH.md` |
+| `GOW_INGAME_STATE=<file>` | Set by the launcher (`<data folder>/ingame-state.json`): the game writes the state of the cheats, the four overlay lines, the four image adjustments, the image quality (resolution, upscaling, sharpness, FXAA) and the frame rate (FPS limit, VSync, Early FINISH) there, 0.4 s after the last change and once more at exit, and the launcher reads and deletes it when the game ends (`gow-core/src/ingame.rs`). Unset: nothing is written. `GOW_PERSIST_DIAG=1` logs each write (`[gow-persist]`). The game must be able to write there (the low-integrity test builds can only write in their working folder) |
+| `GOW_MENU_REPEAT=0` | Turns off the repeat of Left / Right held in the menus (outside gameplay a direction held 0.4 s is released and pressed again every 0.12 s, so the sliders of Image Adjustments and the game's own volume bars can be held; d-pad, keyboard and left stick) |
+| `GOW_MENU_DUMP_MOVIE=<size>` | With `GOW_MENU_DIAG=1`: logs every movie the game builds (`BuildMovie`: resource, size, flags, table counts) and writes the buffer of the one with that size to `movie_dump.bin` in the working folder (research aid: compares the in-memory movie with the PAK) |
 | `GOW_RENDER_DIAG=1`, `GOW_PATH_DIAG=1`, `GOW_ANM_DIAG=1`, `GOW_SKEL_DIAG=1`, `GOW_MODEL_DIAG=1` | Renderer, node search, animation, skeleton |
 | `GOW_GS_REPLAY_TRACE`, `GOW_GS_REPLAY_AFTER`, `GOW_GS_REPLAY_SECONDS`, `GOW_GS_REPLAY_TEXFLUSH` | Record a GS command stretch. The recording works, but the consumer (`replay_gs`) does not build in this tree; use `GOW_VIF_CAPTURE` plus `replay_vif_chain` for VIF1/VU1 work |
 | `PS2X_EE_DIFF*`, `PS2X_EE_WATCH*` | Differential EE runs against PCSX2's interpreter |

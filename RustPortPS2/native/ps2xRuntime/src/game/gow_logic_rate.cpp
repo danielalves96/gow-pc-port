@@ -216,7 +216,7 @@ namespace gow_game
         static uint64_t nextSlot = 0u; // guest cycle of the next logic frame
         const uint32_t ra = GPR_U32(ctx, 31);
         const bool interruptsOn = (ctx->cop0_status & 0x10000u) != 0u; // the thread may block (as in DelayThread)
-        if (ctx->pc != kFrameWaitEntry || ra != kFrameEndReturn || !interruptsOn || fallsBackTo60(rdram))
+        if (ctx->pc != kFrameWaitEntry || ra != kFrameEndReturn || !interruptsOn || gowLogicFps() <= 60 || fallsBackTo60(rdram))
         {
             if (ctx->pc == kFrameWaitEntry && ra == kFrameEndReturn)
             {

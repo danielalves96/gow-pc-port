@@ -90,7 +90,9 @@ The game's movement controller lives at `*(Kratos+0x324)`:
 | Hits taken (0x64–0x6C) | - | never changed |
 
 The input buffer re-sends a refused square/triangle press every 35 ms, at most 3 times over 0.35 s, and stops as soon
-as a transition is queued or a new attack starts. `GOW_CANCEL_BUFFER=0` disables it.
+as a transition is queued or a new attack starts. `GOW_CANCEL_BUFFER=0` disables it. It only acts in gameplay (game state 11,
+`0x29E560`): in the pause menu nothing ever "accepts" a Triangle, so the buffer used to press it again up to three times and one
+tap went back several menu levels (Options, pause menu, game); outside gameplay it is reset on every read.
 
 Diagnostics: `GOW_CANCEL_DIAG=1` (every movement start and queue insertion), `GOW_CANCEL_SEGMENT`,
 `GOW_CANCEL_AXIS`, `GOW_CANCEL_DUMP`, `GOW_CANCEL_WATCH` (write-protects a page and logs the RIP of each write,

@@ -10,6 +10,7 @@ pub mod failure;
 pub mod game;
 pub mod gamepad;
 pub mod gpu;
+pub mod ingame;
 pub mod installer;
 pub mod iso;
 pub mod iso_chd;

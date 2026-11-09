@@ -358,7 +358,10 @@ public:
     // another job is waiting), so the EE runs at most one job ahead; the GS skips that job's own FINISH writes. CSR is then
     // read without waiting for the worker, and the display registers go through the worker queue in drawing order, with a
     // copy of the last values written for the game's read-modify-write.
-    bool gsEarlyFinish() const { return m_gsEarlyFinish; }
+    bool gsEarlyFinish() const { return m_gsEarlyFinish.load(std::memory_order_relaxed); }
+    // GOW-Port: switches early FINISH while the game runs (the Frame Rate page of the menus): the GS worker is drained first, so no
+    // job queued under the old rule is left holding a FINISH that nobody raises. Only with the worker; EE thread.
+    void setGsEarlyFinish(bool enabled);
     void gsQueueDisplay(const uint64_t (&regs)[7]);
     bool gsDisplayShadow(uint64_t (&regs)[7]) const;
     // PATH2 A+D writes to FINISH in a VIF1 packet. `cycle` (STCYCL) and `directLeft` (DIRECT bytes cut by the previous
@@ -499,7 +502,7 @@ public:
         uint32_t earlyFinish = 0;  // GOW-Port: PATH2 FINISH writes this job holds, already given to the game (or at its start)
         bool raiseAtStart = false; // GOW-Port: another job was waiting when it was queued: raise FINISH when the worker starts it
     };
-    bool m_gsEarlyFinish = false;           // GOW-Port: GOW_GS_EARLY_FINISH=1 (opt-in, with the worker)
+    std::atomic<bool> m_gsEarlyFinish{false}; // GOW-Port: GOW_GS_EARLY_FINISH (on by default with the worker); the menus switch it
     uint32_t m_finishScanCycle = 0x0101u;   // STCYCL as the FINISH scan last saw it
     uint32_t m_finishScanDirectLeft = 0u;   // DIRECT payload the scan still has to skip
     mutable std::mutex m_displayShadowMutex;

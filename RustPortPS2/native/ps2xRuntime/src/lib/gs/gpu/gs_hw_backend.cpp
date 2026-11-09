@@ -524,6 +524,30 @@ void main()
     }
 }
 
+// GOW-Port: the internal render scale can be changed while the game runs (the Image Quality page of the menus). gowGsScaleSet only records the
+// request; the backend applies it at the start of its next draw, clear or present (applyPendingScale), on the thread that owns the GL
+// context. The current scale and the largest one the GPU allows are published for the menu.
+static std::atomic<float> g_gowPendingScale{0.0f};
+static std::atomic<float> g_gowCurrentScale{0.0f};
+static std::atomic<float> g_gowMaxScale{16.0f};
+
+void gowGsScaleSet(float scale)
+{
+    g_gowPendingScale.store(scale, std::memory_order_relaxed);
+}
+
+float gowGsScaleGet()
+{
+    const float pending = g_gowPendingScale.load(std::memory_order_relaxed);
+    if (pending > 0.0f)
+        return std::min(pending, g_gowMaxScale.load(std::memory_order_relaxed));
+    const float current = g_gowCurrentScale.load(std::memory_order_relaxed);
+    if (current > 0.0f)
+        return current;
+    const char *s = std::getenv("PS2X_GS_HW_SCALE"); // before the renderer exists
+    return s ? std::max(1.0f, static_cast<float>(std::atof(s))) : 2.0f;
+}
+
 struct GSHwBackend::Impl
 {
     bool xferWatchHit = false; // GOW_GS_HW_XFERWATCH: log the next upload's first bytes
@@ -889,6 +913,7 @@ struct GSHwBackend::Impl
                 g.BindVertexArray(vao);
             }
         }
+        float limitScale = 16.0f;
         if (const char *s = std::getenv("PS2X_GS_HW_SCALE"))
             scale = std::max(1.0f, static_cast<float>(std::atof(s)));
         // GOW-Port: the launcher offers up to 8x. A render target is fbw * 64 PS2 pixels wide (God of War uses fbw <= 10,
@@ -897,12 +922,15 @@ struct GSHwBackend::Impl
             GLint maxTexture = 0;
             g.GetIntegerv(GSGL::kMaxTextureSize, &maxTexture);
             const float limit = maxTexture > 0 ? static_cast<float>(maxTexture) / 1024.0f : 16.0f;
+            limitScale = limit;
             if (scale > limit)
             {
                 std::fprintf(stderr, "[gs-hw] scale %.2f exceeds the GPU texture limit (%d px): using %.2f\n", scale, maxTexture, limit);
                 scale = limit;
             }
         }
+        g_gowCurrentScale.store(scale, std::memory_order_relaxed);
+        g_gowMaxScale.store(std::max(1.0f, std::floor(limitScale)), std::memory_order_relaxed);
         // GOW-Port: record the launcher's effective decision to tell a selected
         // fallback from a run that actually stayed at 3x.
         const char *fallback = std::getenv("PC_FALLBACK_SMOOTHNESS");
@@ -973,6 +1001,68 @@ struct GSHwBackend::Impl
         targets.emplace_back();
         createTarget(targets.back(), fbp, fbw);
         return targets.back();
+    }
+
+    // GOW-Port: gowGsScaleSet. Every render target is re-created at the new size and gets the old picture (a linear blit, depth with
+    // nearest), then the scale changes: everything that sizes by `scale` (draws, scissors, presentation) follows from then on. The
+    // pending batch is flushed first, so no vertex drawn at the old scale is left behind.
+    void applyPendingScale()
+    {
+        const float wanted = g_gowPendingScale.load(std::memory_order_relaxed);
+        if (wanted <= 0.0f)
+            return;
+        g_gowPendingScale.store(0.0f, std::memory_order_relaxed);
+        const float next = std::clamp(wanted, 1.0f, g_gowMaxScale.load(std::memory_order_relaxed));
+        if (!initialized || std::fabs(next - scale) < 0.001f)
+            return;
+        flushPending();
+        const Api &g = gl();
+        constexpr GLenum kReadFb = 0x8CA8, kDrawFb = 0x8CA9;
+        for (RenderTarget &t : targets)
+        {
+            if (!t.fbo)
+                continue;
+            const uint32_t nw = static_cast<uint32_t>(std::ceil(t.pxW * next)), nh = static_cast<uint32_t>(std::ceil(t.pxH * next));
+            GLuint color = 0, fbo = 0, depth = 0;
+            g.GenTextures(1, &color);
+            g.BindTexture(kTexture2D, color);
+            g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kRgba8), nw, nh, 0, kRgba, kUnsignedByte, nullptr);
+            g.TexParameteri(kTexture2D, kTextureMinFilter, kLinear);
+            g.TexParameteri(kTexture2D, kTextureMagFilter, kLinear);
+            g.GenFramebuffers(1, &fbo);
+            g.BindFramebuffer(kFramebuffer, fbo);
+            g.FramebufferTexture2D(kFramebuffer, kColorAttachment0, kTexture2D, color, 0);
+            if (t.depth)
+            {
+                g.GenTextures(1, &depth);
+                g.BindTexture(kTexture2D, depth);
+                g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kDepthComponent32F), nw, nh, 0, kDepthComponent, kFloat, nullptr);
+                g.TexParameteri(kTexture2D, kTextureMinFilter, kNearest);
+                g.TexParameteri(kTexture2D, kTextureMagFilter, kNearest);
+                g.FramebufferTexture2D(kFramebuffer, kDepthAttachment, kTexture2D, depth, 0);
+            }
+            g.Disable(kScissorTest);
+            g.BindFramebuffer(kReadFb, t.fbo);
+            g.BindFramebuffer(kDrawFb, fbo);
+            g.BlitFramebuffer(0, 0, static_cast<GLint>(t.glW), static_cast<GLint>(t.glH), 0, 0, static_cast<GLint>(nw), static_cast<GLint>(nh),
+                              kColorBufferBit, kLinear);
+            if (depth)
+                g.BlitFramebuffer(0, 0, static_cast<GLint>(t.glW), static_cast<GLint>(t.glH), 0, 0, static_cast<GLint>(nw),
+                                  static_cast<GLint>(nh), kDepthBufferBit, kNearest);
+            g.DeleteFramebuffers(1, &t.fbo);
+            g.DeleteTextures(1, &t.color);
+            if (t.depth)
+                g.DeleteTextures(1, &t.depth);
+            t.fbo = fbo;
+            t.color = color;
+            t.depth = depth;
+            t.glW = nw;
+            t.glH = nh;
+        }
+        g.BindFramebuffer(kFramebuffer, 0);
+        std::fprintf(stderr, "[gs-hw] render scale %.2f -> %.2f (changed in game, %zu targets)\n", scale, next, targets.size());
+        scale = next;
+        g_gowCurrentScale.store(scale, std::memory_order_relaxed);
     }
 
     void destroy(RenderTarget &t)
@@ -3135,6 +3225,7 @@ void GSHwBackend::Submit(const GSPrimitiveBatch &batch)
     if (!d.ensure())
         return;
     Impl::ProfileScope profile(d.profileEnabled ? &d.submitNs : nullptr);
+    d.applyPendingScale();
     d.submit(batch);
 }
 
@@ -3226,6 +3317,7 @@ bool GSHwBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
     Impl &d = *m_impl;
     if (!d.ensure() || context.frame.fbw == 0u)
         return false;
+    d.applyPendingScale();
     d.flushPending();
     const Api &g = d.gl();
     RenderTarget &rt = d.target(context.frame.fbp, context.frame.fbw);
@@ -3277,6 +3369,7 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &requestIn)
     PresentationFrame frame;
     if (!d.ensure())
         return frame;
+    d.applyPendingScale();
     struct GpuFrameRestart
     {
         Impl &backend;

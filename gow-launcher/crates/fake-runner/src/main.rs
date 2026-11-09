@@ -18,6 +18,10 @@ fn main() {
     if let Ok(message) = std::env::var("FAKE_RUNNER_MESSAGE") {
         eprintln!("{message}");
     }
+    // what the game writes when the player changes something inside it (`FAKE_RUNNER_INGAME` is the JSON to write)
+    if let (Ok(json), Ok(path)) = (std::env::var("FAKE_RUNNER_INGAME"), std::env::var("GOW_INGAME_STATE")) {
+        let _ = std::fs::write(path, json);
+    }
     if let Some(ms) = std::env::var("FAKE_RUNNER_SLEEP_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_millis(ms));
     }

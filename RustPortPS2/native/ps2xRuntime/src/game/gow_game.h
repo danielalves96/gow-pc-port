@@ -13,6 +13,7 @@
 int gowLogicFps(); // lib/gow_integration.cpp: PC_LOGIC_FPS (60 unless 120, 144, 165 or 240 and no 30 FPS cap)
 void gowNoteGameFlip(); // lib/gow_integration.cpp: the game swapped its display buffer
 void gowSetHangReportExtra(void (*report)(PS2Runtime &)); // lib/gow_integration.cpp: more [gow-hang] lines (diagnostics)
+void gowSetVBlankExtra(void (*callback)(uint8_t *rdram)); // lib/gow_integration.cpp: one more EE-thread callback per VBlank
 
 namespace gow_game
 {
@@ -88,6 +89,15 @@ namespace gow_game
     void gowDiagFlashReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowDiagAnimationTime(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowDiagAnimationDuration(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // GOW_MENU_DIAG=1 / GOW_NATIVE_CHEATS_MENU=1: bounded read-only observers of the original UI (gow_menu_diag.cpp).
+    void gowDiagMenuMessages(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x1B8A48 LoadMessages
+    void gowDiagMenuShow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);     // 0x1B9358 ShowPrompt
+    void gowDiagMenuMovie(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);    // 0x1B7CE0 LoadMovie
+    // GOW_NATIVE_CHEATS_MENU=1 (gow_menu_diag.cpp): Port Options extension. BuildMovie 0x14AE68 hands the game a movie with
+    // the Port Options row and pages; the VBlank callback keeps the PS2_<cheat> HUD variables and the cheat engine in step.
+    void gowNativeMenuBuildMovie(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void gowNativeMenuVBlank(uint8_t *rdram);
 
     void gowDiagFilteredCopy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowDiagInitUnpack(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

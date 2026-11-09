@@ -91,6 +91,11 @@ fn the_game_is_started_with_the_contracted_environment() {
     assert_eq!(value(&log, "PC_FXAA"), None, "FXAA is off in the settings");
     assert_eq!(value(&log, "PC_CHEATS"), Some("god_mode,max_orbs"));
     assert_eq!(value(&log, "PC_CHEATS_SHORTCUT"), Some("9+11"));
+    assert_eq!(
+        value(&log, "GOW_INGAME_STATE"),
+        Some(paths.ingame_state_file().to_str().unwrap()),
+        "where the game writes its changes"
+    );
     assert_eq!(value(&log, "PC_RA_ENABLED"), Some("0"));
     assert_eq!(value(&log, "PC_RA_PASSWORD"), None, "an inherited password is not passed on");
     assert!(value(&log, "PC_KEYS").unwrap().starts_with("ls_up=87;"));
@@ -99,6 +104,19 @@ fn the_game_is_started_with_the_contracted_environment() {
     assert!(Path::new(value(&log, "PS2X_GS_SHADER_CACHE_DIR").unwrap()).ends_with("shaders"));
     // The icon is written by the app at start-up; here it does not exist, so it must not be passed.
     assert_eq!(value(&log, "PC_ICON"), None);
+
+    // What the player changed inside the game comes back into the settings once the game has ended, and the file is consumed.
+    std::env::set_var("FAKE_RUNNER_INGAME", r#"{"cheats":"max_orbs","showFps":true,"brightness":70}"#);
+    let (_, _) = run(&settings, &paths, &options);
+    std::env::remove_var("FAKE_RUNNER_INGAME");
+    assert!(paths.ingame_state_file().exists(), "the game wrote its state");
+    let mut after = settings.clone();
+    assert!(gow_core::ingame::consume(&mut after, &paths.ingame_state_file()));
+    assert_eq!(after.cheats, "max_orbs");
+    assert!(after.show_fps);
+    assert_eq!(after.brightness, 70);
+    assert_eq!(after.contrast, settings.contrast, "what the game did not send is left alone");
+    assert!(!paths.ingame_state_file().exists(), "read once");
 
     // A second run rotates the log.
     let (_, second) = run(&settings, &paths, &options);

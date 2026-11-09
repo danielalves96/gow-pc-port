@@ -5,6 +5,8 @@
 #include "gow_pad2_packet.h"
 
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -78,6 +80,41 @@ namespace gow_game
             // Capture the GS's own presented pixels; normal play never injects input.
             if (padSmokeTestEnabled())
                 padSmokeTest(rdram, ctx, runtime, state);
+            // GOW-Port: Left / Right held in a menu repeat. The game's menus act on the press only (a slider moved one step per press
+            // however long the button was held, so 50 to 100 on a 2 % slider took 25 presses). Outside gameplay (state 11) a
+            // direction held for REPEAT_DELAY seconds is released and pressed again every REPEAT_PERIOD seconds: the d-pad bits and
+            // the left stick's X axis, so keyboard, d-pad and stick all repeat. GOW_MENU_REPEAT=0 turns it off.
+            {
+                static const bool off = [] { const char *v = std::getenv("GOW_MENU_REPEAT"); return v && v[0] == '0'; }();
+                constexpr double kRepeatDelay = 0.40, kRepeatPeriod = 0.12; // seconds before the first repeat, between repeats
+                using Clock = std::chrono::steady_clock;
+                static Clock::time_point since[2];
+                static bool held[2];                                       // 0 left, 1 right
+                const bool menu = !off && readGuest32(rdram, 0x29E560u) != 11u;
+                const bool down[2] = {(state[2] & 0x80u) == 0u || state[6] < 64u, (state[2] & 0x20u) == 0u || state[6] > 192u};
+                const Clock::time_point now = Clock::now();
+                for (int i = 0; i < 2; ++i)
+                {
+                    if (!menu || !down[i])
+                    {
+                        held[i] = false;
+                        continue;
+                    }
+                    if (!held[i])
+                    {
+                        held[i] = true;
+                        since[i] = now;
+                        continue;
+                    }
+                    const double t = std::chrono::duration<double>(now - since[i]).count();
+                    if (t > kRepeatDelay && std::fmod(t - kRepeatDelay, kRepeatPeriod) >= kRepeatPeriod / 2.0)
+                    {
+                        state[2] |= i == 0 ? 0x80u : 0x20u;        // released for the second half of each period
+                        if (state[6] < 64u || state[6] > 192u)
+                            state[6] = 128u;
+                    }
+                }
+            }
             const auto packet = gow_pad2::makePacket(state);
             // GOW-Port: GOW_PAD_LOG=1 prints the libpad2 packet every 120 reads (buttons are active-low).
             static const bool padLog = std::getenv("GOW_PAD_LOG") != nullptr;

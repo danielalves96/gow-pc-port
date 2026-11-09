@@ -88,7 +88,7 @@ or audio:
   count above 0, and `GOW_PERF_DIAG=1` must report a low `vu_ms`.
 - **Always measure with the launcher's real environment**, not an invented one: `gow-launcher/crates/gow-core/src/launch.rs`
   (`BASE_ENVIRONMENT`: `PS2X_GS_WORKER=1`, `GOW_GS_FINISH_ASYNC=1`, `GOW_AUDIO_DEVICE=default`, `GOW_PERF_DIAG=1`,
-  `GOW_PERF_FRAME_PC`) plus the user's settings (`settings.json` in `%APPDATA%\GOW_PC\Launcher`: internal
+  `GOW_PERF_FRAME_PC`, `GOW_NATIVE_CHEATS_MENU=1`) plus the user's settings (`settings.json` in `%APPDATA%\GOW_PC\Launcher`: internal
   scale, FXAA, filter, resolution). `cargo run -p gow-cli -- env` from `gow-launcher/` prints it. Without
   `PS2X_GS_WORKER=1` the GS runs inline with the EE, which causes audio dropouts and slowdowns that players never see.
   Confirm in the log that `[gs-worker] VIF1/GIF processing on a worker thread` appears, and check the `exepath` of the

@@ -55,6 +55,7 @@ std::atomic<uint64_t> g_gowAudioFramesProduced{0};
 // GOW-Port: funciones de PC Port (gow_integration.cpp).
 void gowWindowOpen(const char *title);
 int gowWindowFps();
+bool gowVsyncEnabled();
 void gowIntegrationInstall(PS2Runtime &runtime, const std::string &elfPath);
 void gowFrameInput();
 
@@ -72,8 +73,12 @@ static bool hostSyncToVBlank()
     }();
     if (!on)
         return false;
-    const char *vsync = std::getenv("PC_VSYNC");
-    return !(vsync && *vsync && *vsync != '0') && gowWindowFps() == 60;
+    return !gowVsyncEnabled() && gowWindowFps() == 60; // GOW-Port: VSync can be switched in game (gow_integration.cpp)
+}
+
+bool gowHostSyncToVBlank()
+{
+    return hostSyncToVBlank();
 }
 
 bool ps2AudioOpenNamedDevice(void (*fill)(void *, unsigned int), unsigned int sampleRate); // ps2_audio_device.cpp

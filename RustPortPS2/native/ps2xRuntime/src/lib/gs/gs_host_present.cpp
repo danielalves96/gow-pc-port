@@ -5,7 +5,10 @@
 #include "runtime/ps2_perf.h"
 #include "ps2_log.h"
 
+#include "../gow_image.h"
+#include "../gow_persist.h" // GOW-Port: live Shade Boost settings for the pause menu
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -141,49 +144,103 @@ void main()
     int g_scalerShadeOn = -1, g_scalerShade = -1; // GOW-Port: Shade Boost
     bool g_scalerTried = false;
 
-    // GOW-Port: Shade Boost settings, 0..100 with 50 = no change (the launcher only sets the variables it changed).
+    // GOW-Port: Shade Boost settings, 0..100 with 50 = no change (the launcher only sets the variables it changed). They are atomics
+    // since the pause menu's Image Adjustments page changes them live (gowImageSet) while the render thread reads them every frame.
+    // Order: brightness, contrast, gamma, saturation.
+    std::atomic<int> g_shadeLevel[4] = {50, 50, 50, 50};
+
+    // GOW-Port: the upscaling settings the launcher starts with (PC_FILTER / GOW_SCALER, GOW_SHARPEN, PC_FXAA), changed live by the
+    // Image Quality page of the menus (gowFilterSet, gowSharpnessSet, gowFxaaSet): the render thread reads them every frame.
+    // Filter: 0 bicubic + sharpen ("fsr" in the launcher), 1 bilinear, 2 pixel (drawn like bilinear: the launcher sends both as the
+    // bilinear stretch). Sharpen is the shader's strength, 0..0.5.
+    std::atomic<int> g_filterMode{0};
+    std::atomic<float> g_sharpen{0.5f};
+    std::atomic<int> g_fxaaOn{0};
+    void qualityFromEnvironment()
+    {
+        static const bool once = [] {
+            const char *filter = std::getenv("PC_FILTER");
+            const char *scaler = std::getenv("GOW_SCALER");
+            int mode = 0;
+            if (filter && std::strcmp(filter, "bilinear") == 0)
+                mode = 1;
+            else if (filter && std::strcmp(filter, "pixel") == 0)
+                mode = 2;
+            else if (!filter && scaler && std::strcmp(scaler, "bilinear") == 0)
+                mode = 1;
+            g_filterMode.store(mode);
+            if (const char *v = std::getenv("GOW_SHARPEN"))
+                g_sharpen.store(std::clamp(static_cast<float>(std::atof(v)), 0.0f, 0.5f));
+            const char *fxaa = std::getenv("PC_FXAA");
+            g_fxaaOn.store(fxaa && fxaa[0] == '1' ? 1 : 0);
+            return true;
+        }();
+        (void)once;
+    }
+
+    void shadeLevelsFromEnvironment()
+    {
+        static const bool once = [] {
+            static const char *const names[4] = {"PC_BRIGHTNESS", "PC_CONTRAST", "PC_GAMMA", "PC_SATURATION"};
+            bool any = false;
+            for (int i = 0; i < 4; ++i)
+            {
+                const char *v = std::getenv(names[i]);
+                const int n = std::clamp(v && *v ? std::atoi(v) : 50, 0, 100);
+                g_shadeLevel[i].store(n);
+                any = any || n != 50;
+            }
+            if (any)
+                std::fprintf(stderr, "[gs-present] shade boost: brightness %d contrast %d gamma %d saturation %d\n",
+                             g_shadeLevel[0].load(), g_shadeLevel[1].load(), g_shadeLevel[2].load(), g_shadeLevel[3].load());
+            return true;
+        }();
+        (void)once;
+    }
+
     struct ShadeBoost
     {
         bool on = false;
         float values[4] = {0.0f, 1.0f, 1.0f, 1.0f}; // brightness offset, contrast, saturation, 1 / gamma
     };
 
-    const ShadeBoost &shadeBoost()
+    // The current settings, as the shader wants them (a few float operations per frame).
+    ShadeBoost shadeBoost()
     {
-        static const ShadeBoost boost = [] {
-            const auto level = [](const char *name) {
-                const char *v = std::getenv(name);
-                const int n = v && *v ? std::atoi(v) : 50;
-                return std::clamp(n, 0, 100);
-            };
-            const int brightness = level("PC_BRIGHTNESS"), contrast = level("PC_CONTRAST");
-            const int gamma = level("PC_GAMMA"), saturation = level("PC_SATURATION");
-            ShadeBoost b;
-            b.on = brightness != 50 || contrast != 50 || gamma != 50 || saturation != 50;
-            b.values[0] = static_cast<float>(brightness - 50) / 200.0f;                   // -0.25 .. +0.25
-            b.values[1] = static_cast<float>(contrast) / 50.0f;                           // 0 .. 2 around mid-grey
-            b.values[2] = static_cast<float>(saturation) / 50.0f;                         // 0 (grey) .. 2
-            b.values[3] = std::exp2(static_cast<float>(gamma - 50) / 50.0f);              // 1 / gamma, gamma 2 .. 0.5
-            if (b.on)
-                std::fprintf(stderr, "[gs-present] shade boost: brightness %d contrast %d gamma %d saturation %d\n",
-                             brightness, contrast, gamma, saturation);
-            return b;
-        }();
-        return boost;
+        shadeLevelsFromEnvironment();
+        const int brightness = g_shadeLevel[0].load(std::memory_order_relaxed), contrast = g_shadeLevel[1].load(std::memory_order_relaxed);
+        const int gamma = g_shadeLevel[2].load(std::memory_order_relaxed), saturation = g_shadeLevel[3].load(std::memory_order_relaxed);
+        ShadeBoost b;
+        b.on = brightness != 50 || contrast != 50 || gamma != 50 || saturation != 50;
+        b.values[0] = static_cast<float>(brightness - 50) / 200.0f;                   // -0.25 .. +0.25
+        b.values[1] = static_cast<float>(contrast) / 50.0f;                           // 0 .. 2 around mid-grey
+        b.values[2] = static_cast<float>(saturation) / 50.0f;                         // 0 (grey) .. 2
+        b.values[3] = std::exp2(static_cast<float>(gamma - 50) / 50.0f);              // 1 / gamma, gamma 2 .. 0.5
+        return b;
+    }
+
+    // GOW-Port: with the native pause menu (GOW_NATIVE_CHEATS_MENU=1, which the launcher always sets) the shader is always loaded,
+    // so the Image Adjustments page can switch the Shade Boost on in the middle of a session.
+    bool nativeMenuOn()
+    {
+        static const bool on = [] { const char *v = std::getenv("GOW_NATIVE_CHEATS_MENU"); return v && v[0] == '1'; }();
+        return on;
     }
 
     bool bilinearScaler()
     {
-        static const bool bilinear = [] { const char *v = std::getenv("GOW_SCALER"); return v && std::strcmp(v, "bilinear") == 0; }();
-        return bilinear;
+        qualityFromEnvironment();
+        return g_filterMode.load(std::memory_order_relaxed) != 0;
     }
 
     bool scalerEnabled()
     {
-        // GOW-Port: with PC_FXAA=1 or a Shade Boost the shader is also needed with the bilinear stretch.
+        // GOW-Port: with PC_FXAA=1 or a Shade Boost (at start, or possible later through the native menu) the shader is also
+        // needed with the bilinear stretch; there it keeps its one linear tap ("plain"), so the picture is the same until the
+        // player changes a setting.
         static const bool on = [] {
             const char *fxaa = std::getenv("PC_FXAA");
-            return !bilinearScaler() || (fxaa && fxaa[0] == '1') || shadeBoost().on;
+            return !bilinearScaler() || (fxaa && fxaa[0] == '1') || shadeBoost().on || nativeMenuOn();
         }();
         return on;
     }
@@ -214,6 +271,68 @@ void main()
         }
         return g_scaler.id != 0u ? &g_scaler : nullptr;
     }
+}
+
+// GOW-Port: gow_image.h, for the "Image Adjustments" page of the pause menu.
+int gowImageCount()
+{
+    return 4;
+}
+
+int gowImageGet(int index)
+{
+    if (index < 0 || index >= 4)
+        return 50;
+    shadeLevelsFromEnvironment();
+    return g_shadeLevel[index].load(std::memory_order_relaxed);
+}
+
+// GOW-Port: gow_quality (lib/gow_integration.cpp): the upscaling settings of the Image Quality page. Filter 0 bicubic, 1 bilinear,
+// 2 pixel; sharpness in percent of the shader's maximum (0.5); FXAA 0 / 1.
+int gowFilterGet()
+{
+    qualityFromEnvironment();
+    return g_filterMode.load(std::memory_order_relaxed);
+}
+
+void gowFilterSet(int mode)
+{
+    qualityFromEnvironment();
+    g_filterMode.store(std::clamp(mode, 0, 2), std::memory_order_relaxed);
+}
+
+int gowSharpnessGet()
+{
+    qualityFromEnvironment();
+    return static_cast<int>(std::lround(g_sharpen.load(std::memory_order_relaxed) / 0.5f * 100.0f));
+}
+
+void gowSharpnessSet(int percent)
+{
+    qualityFromEnvironment();
+    g_sharpen.store(0.5f * static_cast<float>(std::clamp(percent, 0, 100)) / 100.0f, std::memory_order_relaxed);
+}
+
+int gowFxaaGet()
+{
+    qualityFromEnvironment();
+    return g_fxaaOn.load(std::memory_order_relaxed);
+}
+
+void gowFxaaSet(int on)
+{
+    qualityFromEnvironment();
+    g_fxaaOn.store(on ? 1 : 0, std::memory_order_relaxed);
+}
+
+void gowImageSet(int index, int percent)
+{
+    if (index < 0 || index >= 4)
+        return;
+    shadeLevelsFromEnvironment(); // the start values first, so a later read of the environment cannot overwrite this
+    const int next = std::clamp(percent, 0, 100);
+    if (g_shadeLevel[index].exchange(next, std::memory_order_relaxed) != next)
+        gowPersistTouch(); // GOW-Port: the launcher keeps the value for the next session
 }
 
 namespace
@@ -417,7 +536,7 @@ GSHostPresentation::View GSHostPresentation::prepare(GS &gs, uint64_t vsyncTick)
     // swap latches a new picture (otherwise the window shows at most one new frame per VBlank). The VBlank latch then only
     // runs when the game has not swapped for two VBlanks (loading, movies, stalls): latching the same picture again on every
     // VBlank would publish duplicates that push real frames out of the shared queue.
-    static const bool latchOnSwap = gowLogicFps() > 60;
+    const bool latchOnSwap = gowLogicFps() > 60; // not cached: the FPS limit can change in game
     static uint64_t lastSwap = 0u, lastSwapTick = 0u;
     bool needsLatch = !hasLatched;
     if (latchOnSwap)
@@ -594,15 +713,16 @@ GSHostPresentation::View GSHostPresentation::renderFrame(GS &gs, uint64_t vsyncT
     if (scaler)
     {
         const float size[2] = {sourceWidth, sourceHeight};
-        static const float sharpen = [] { const char *v = std::getenv("GOW_SHARPEN"); return v ? static_cast<float>(std::atof(v)) : 0.5f; }();
+        qualityFromEnvironment();
+        const float sharpen = g_sharpen.load(std::memory_order_relaxed);
         SetShaderValue(*scaler, g_scalerSrcSize, size, SHADER_UNIFORM_VEC2);
         SetShaderValue(*scaler, g_scalerSharpen, &sharpen, SHADER_UNIFORM_FLOAT);
         // GOW-Port: the bilinear stretch (GOW_SCALER=bilinear) only reaches the shader for FXAA or Shade Boost: keep its one tap.
         const float plain = magnified && !bilinearScaler() ? 0.0f : 1.0f;
         SetShaderValue(*scaler, g_scalerPlain, &plain, SHADER_UNIFORM_FLOAT);
-        static const float fxaa = [] { const char *v = std::getenv("PC_FXAA"); return v && v[0] == '1' ? 1.0f : 0.0f; }();
+        const float fxaa = g_fxaaOn.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
         SetShaderValue(*scaler, g_scalerFxaa, &fxaa, SHADER_UNIFORM_FLOAT);
-        const ShadeBoost &boost = shadeBoost();
+        const ShadeBoost boost = shadeBoost();
         const float shadeOn = boost.on ? 1.0f : 0.0f;
         SetShaderValue(*scaler, g_scalerShadeOn, &shadeOn, SHADER_UNIFORM_FLOAT);
         SetShaderValue(*scaler, g_scalerShade, boost.values, SHADER_UNIFORM_VEC4);

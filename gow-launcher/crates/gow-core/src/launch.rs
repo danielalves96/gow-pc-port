@@ -14,12 +14,16 @@ use crate::settings::Settings;
 /// Variables of Waffle565's runtime (`run_gow.sh`): VIF1/VU1/GIF on the GS thread,
 /// asynchronous FINISH, sound on the default stream and the `[gow-perf]` line every 5 s. A variable that is already
 /// in the user's environment is respected, so comparisons can be made without touching the launcher.
-const BASE_ENVIRONMENT: [(&str, &str); 5] = [
+/// `GOW_NATIVE_CHEATS_MENU=1`: the Port Options entry (with Cheats) of the game's own pause menu (docs/dev/NATIVE_MENU_RESEARCH.md). The runtime
+/// leaves the stock menu alone when cheats are unavailable (RetroAchievements Hardcore) or the data is not the retail game, and
+/// `GOW_NATIVE_CHEATS_MENU=0` in the user's environment turns it off.
+const BASE_ENVIRONMENT: [(&str, &str); 6] = [
     ("PS2X_GS_WORKER", "1"),
     ("GOW_GS_FINISH_ASYNC", "1"),
     ("GOW_AUDIO_DEVICE", "default"),
     ("GOW_PERF_DIAG", "1"),
     ("GOW_PERF_FRAME_PC", "0x001837B8"),
+    ("GOW_NATIVE_CHEATS_MENU", "1"),
 ];
 
 /// What `start` needs besides the settings.
@@ -425,7 +429,11 @@ mod tests {
         let defaults = plan(&fixture, 2.0);
         assert_eq!(value(&defaults, "PS2X_GS_WORKER"), Some("1"));
         assert_eq!(value(&defaults, "GOW_PERF_FRAME_PC"), Some("0x001837B8"));
+        assert_eq!(value(&defaults, "GOW_NATIVE_CHEATS_MENU"), Some("1"));
         assert_eq!(value(&defaults, "GOW_PRESENT_BLOCKING"), Some("0"));
+        // the user can turn the Port Options entry off from the environment
+        let off = plan_with(&fixture, 2.0, |name| (name == "GOW_NATIVE_CHEATS_MENU").then(|| "0".to_string()));
+        assert_eq!(value(&off, "GOW_NATIVE_CHEATS_MENU"), None);
         let overridden = plan_with(&fixture, 2.0, |name| (name == "PS2X_GS_WORKER").then(|| "0".to_string()));
         assert_eq!(value(&overridden, "PS2X_GS_WORKER"), None);
         assert_eq!(overridden.resolve("PS2X_GS_WORKER", |_| Some("0".into())), Some("0".into()));
@@ -460,6 +468,7 @@ mod tests {
             ("GOW_CANCEL", "1"),
             ("GOW_GS_EARLY_FINISH", "1"),
             ("GOW_GS_FINISH_ASYNC", "1"),
+            ("GOW_NATIVE_CHEATS_MENU", "1"),
             ("GOW_PERF_DIAG", "1"),
             ("GOW_PERF_FRAME_PC", "0x001837B8"),
             ("GOW_PRESENT_BLOCKING", "0"),
