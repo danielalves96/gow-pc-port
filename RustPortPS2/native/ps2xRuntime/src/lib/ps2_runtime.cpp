@@ -1586,7 +1586,12 @@ bool PS2Runtime::dispatchGuestBranchSlow(uint8_t *rdram,
         return false;
     }
 
-    if (!hasFunction(targetPc))
+    // GOW-Port: one table read for the existence check and the lookup (hasFunction + lookupFunction read it twice);
+    // lookupFunction's dispatch-history push is kept below, so the history is the same.
+    uint32_t targetSlot = 0u;
+    RecompiledFunction targetFn =
+        generatedFunctionTableSlot(targetPc, targetSlot) ? g_ps2RecompiledFunctionTable[targetSlot] : nullptr;
+    if (targetFn == nullptr)
     {
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
 
@@ -1624,7 +1629,7 @@ bool PS2Runtime::dispatchGuestBranchSlow(uint8_t *rdram,
         return false;
     }
 
-    RecompiledFunction targetFn = lookupFunction(targetPc);
+    pushDispatchPc(targetPc);
     const uint32_t entryPc = ctx->pc;
     const uint64_t checkpointSerial = m_eeCheckpointSerial;
     const uint64_t jumpSerial = g_guestJumpSerial;
