@@ -1968,14 +1968,16 @@ struct GSHwBackend::Impl
     }
 
     // pixel (x, y) of a 16 bit view (psm/base/bw) -> pixel and halfword of the 32 bit owner laid out as ownerPsm at fbp/fbw
-    bool viewToOwner(uint32_t viewPsm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t ownerPsm, uint32_t fbp, uint32_t fbw,
-                     uint32_t &ox, uint32_t &oy, uint32_t &half)
+    // GOW-Port: the format of the view and the inverse table of the owner are looked up once per sprite by the caller
+    // (tryShuffle maps one 8x8 unit at a time: 2 lookups of each per unit); the arithmetic is the same.
+    static bool viewToOwnerWith(const GSSwizzle::Format &viewFormat, const uint16_t *inverse, uint32_t base, uint32_t bw, uint32_t x, uint32_t y,
+                                uint32_t fbp, uint32_t fbw, uint32_t &ox, uint32_t &oy, uint32_t &half)
     {
-        const uint32_t byte = GSSwizzle::Locate(GSSwizzle::GetFormat(viewPsm), base, bw, x, y).byte;
+        const uint32_t byte = GSSwizzle::Locate(viewFormat, base, bw, x, y).byte;
         const uint32_t word = byte >> 2, first = fbp * 2048u;
         if (word < first)
             return false;
-        const uint32_t rel = word - first, page = rel >> 11u, e = inverseFor(ownerPsm)[rel & 2047u];
+        const uint32_t rel = word - first, page = rel >> 11u, e = inverse[rel & 2047u];
         half = (byte >> 1) & 1u;
         ox = (page % fbw) * 64u + (e & 63u);
         oy = (page / fbw) * 32u + (e >> 6u);
@@ -1983,12 +1985,12 @@ struct GSHwBackend::Impl
     }
 
     // an 8x8 unit of the view at (x, y) -> an 8x8 owner block at (ox, oy), one halfword (checked at the far corner)
-    bool unitToOwner(uint32_t viewPsm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t ownerPsm, uint32_t fbp, uint32_t fbw,
-                     uint32_t &ox, uint32_t &oy, uint32_t &half)
+    static bool unitToOwnerWith(const GSSwizzle::Format &viewFormat, const uint16_t *inverse, uint32_t base, uint32_t bw, uint32_t x, uint32_t y,
+                                uint32_t fbp, uint32_t fbw, uint32_t &ox, uint32_t &oy, uint32_t &half)
     {
         uint32_t ex, ey, eh;
-        return viewToOwner(viewPsm, base, bw, x, y, ownerPsm, fbp, fbw, ox, oy, half) &&
-               viewToOwner(viewPsm, base, bw, x + 7u, y + 7u, ownerPsm, fbp, fbw, ex, ey, eh) && eh == half && ex == ox + 7u && ey == oy + 7u;
+        return viewToOwnerWith(viewFormat, inverse, base, bw, x, y, fbp, fbw, ox, oy, half) &&
+               viewToOwnerWith(viewFormat, inverse, base, bw, x + 7u, y + 7u, fbp, fbw, ex, ey, eh) && eh == half && ex == ox + 7u && ey == oy + 7u;
     }
 
     static uint32_t fbmsk16(uint32_t m)
@@ -2075,12 +2077,14 @@ struct GSHwBackend::Impl
         const uint32_t srcOwnerPsm = srcDepth ? 0x30u : 0x00u, srcFbp = srcDepth ? src->zbp : src->fbp;
         std::vector<ShuffleVertex> quads[4];
         uint32_t maxX = 0, maxY = 0;
+        const GSSwizzle::Format &dstView = GSSwizzle::GetFormat(c.frame.psm), &srcView = GSSwizzle::GetFormat(tpsm);
+        const uint16_t *dstInverse = inverseFor(0x00u).data(), *srcInverse = inverseFor(srcOwnerPsm).data();
         for (int y = y0; y < y1; y += 8)
             for (int x = x0; x < x1; x += 8)
             {
                 uint32_t dx, dy, hd, sx, sy, hs;
-                if (!unitToOwner(c.frame.psm, c.frame.fbp * 32u, c.frame.fbw, x, y, 0x00u, dst->fbp, dst->fbw, dx, dy, hd) ||
-                    !unitToOwner(tpsm, c.tex0.tbp0, c.tex0.tbw, x + du, y + dv, srcOwnerPsm, srcFbp, src->fbw, sx, sy, hs))
+                if (!unitToOwnerWith(dstView, dstInverse, c.frame.fbp * 32u, c.frame.fbw, x, y, dst->fbp, dst->fbw, dx, dy, hd) ||
+                    !unitToOwnerWith(srcView, srcInverse, c.tex0.tbp0, c.tex0.tbw, x + du, y + dv, srcFbp, src->fbw, sx, sy, hs))
                     { shuffleWhy = 12; return false; }
                 if (dx + 8u > dst->pxW || dy + 8u > dst->pxH || sx + 8u > src->pxW || sy + 8u > src->pxH)
                     { shuffleWhy = 13; return false; }
