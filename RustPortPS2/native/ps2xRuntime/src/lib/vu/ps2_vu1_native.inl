@@ -1058,7 +1058,7 @@ void VU1NativeAccess::recordReplay(VU1Interpreter &vu, void *contextPtr, uint32_
         auto rec = std::make_unique<Vu1nRecord>();
         VU1Interpreter saved(vu);
         unsigned total = 0, differ = 0;
-        // GOW_VU1N_REPLAY_HASHES=<file>: saves the hash of each record in this build (8 bytes per record) to compare two
+        // GOW_VU1N_REPLAY_HASHES=<file>: saves the hash of each record in this build (8 bytes per record, final cycle count included) to compare two
         // builds bit by bit (compiler, options like /arch:AVX2, generator), including the records that already differ from the recording.
         static const char *hashesOut = std::getenv("GOW_VU1N_REPLAY_HASHES");
         std::vector<uint64_t> hashes;
@@ -1094,8 +1094,10 @@ void VU1NativeAccess::recordReplay(VU1Interpreter &vu, void *contextPtr, uint32_
                 }
                 else
                 {
+                    // GOW-Port: the saved hashes also cover the VU1 cycle count at the end of the record (the recorded hash
+                    // does not), so two builds can be compared for cycle-exact timing, not only for the same values.
                     if (hashesOut)
-                        hashes.push_back(h);
+                        hashes.push_back(fnvBytes(h, &vu.m_cycle, sizeof(vu.m_cycle)));
                     if (h != rec->hash && differ++ < 20u)
                         std::fprintf(stderr, "[vu1n-replay] record %u startPc=%x differs\n", total, rec->state.pc);
                 }
