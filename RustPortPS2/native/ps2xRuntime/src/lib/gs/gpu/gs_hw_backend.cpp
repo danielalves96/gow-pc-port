@@ -1898,9 +1898,23 @@ struct GSHwBackend::Impl
         return a == b;
     }
 
-    void addVertex(const GSDrawState &s, const GSVertex &v, float u, float tv, float zmax)
+    // GOW-Port: per-draw constants of addVertex (they used to be recomputed for each of the vertices of the draw)
+    float vtxHalf = 0.0f, vtxOfx = 0.0f, vtxOfy = 0.0f;
+    uint64_t vtxZmask = 0;
+    bool vtxZmasked = false;
+
+    void prepareVertices(const GSDrawState &s, float zmax)
     {
-        const GSContext &c = s.context;
+        // identical expressions to the per-vertex ones they replace, so every value is bit for bit the same
+        vtxHalf = 0.5f / scale;
+        vtxOfx = static_cast<float>(s.context.xyoffset.ofx) / 16.0f;
+        vtxOfy = static_cast<float>(s.context.xyoffset.ofy) / 16.0f;
+        vtxZmasked = zmax < 4294967295.0f;
+        vtxZmask = zmax < 70000.0f ? 0xFFFFull : 0xFFFFFFull;
+    }
+
+    void addVertex(const GSDrawState &, const GSVertex &v, float u, float tv, float zmax)
+    {
         if (pending.empty())
             firstRawZ = v.z;
         // The GS samples pixel (x, y) at the integer point (x, y); GL samples host pixel h at its centre h + 0.5. Shifting
@@ -1909,19 +1923,22 @@ struct GSHwBackend::Impl
         // pixel scale * x equal the PS2's at x. (Half a PS2 pixel moved every primitive one host pixel down and right at
         // 2x: host row/column 0 of every target stayed unpainted and each copy pass shifted the picture by a host pixel;
         // the filtered passes smeared that stale edge into the picture, the bright bar along the top and left.)
-        const float half = 0.5f / scale;
-        HwVertex h;
-        h.x = v.x - static_cast<float>(c.xyoffset.ofx) / 16.0f + half;
-        h.y = v.y - static_cast<float>(c.xyoffset.ofy) / 16.0f + half;
+        HwVertex &h = pending.emplace_back();
+        h.x = v.x - vtxOfx + vtxHalf;
+        h.y = v.y - vtxOfy + vtxHalf;
         // the Z buffer keeps only its low bits (Z24: 24, Z16: 16): a vertex Z of 1<<24 is stored as 0
         double zq = std::max(v.z, 0.0);
-        if (zmax < 4294967295.0f)
-            zq = static_cast<double>(static_cast<uint64_t>(zq) & (zmax < 70000.0f ? 0xFFFFull : 0xFFFFFFull));
+        if (vtxZmasked)
+        {
+            // a non-negative double below 2^63 converts identically through the signed instruction (the unsigned conversion
+            // costs a compare and a second path)
+            const uint64_t zi = zq < 9.0e18 ? static_cast<uint64_t>(static_cast<int64_t>(zq)) : static_cast<uint64_t>(zq);
+            zq = static_cast<double>(zi & vtxZmask);
+        }
         h.z = static_cast<float>(std::min(zq / zmax, 1.0));
         h.r = v.r; h.g = v.g; h.b = v.b; h.a = v.a;
         h.s = v.s; h.t = v.t; h.q = v.q;
         h.u = u; h.v = tv;
-        pending.push_back(h);
     }
 
     static bool family16(uint8_t psm) { return psm == GS_PSM_CT16 || psm == GS_PSM_CT16S; }
@@ -2212,6 +2229,7 @@ struct GSHwBackend::Impl
             havePending = true;
         }
         const float zmax = zMaxFor(s.context.zbuf.psm);
+        prepareVertices(s, zmax);
         const float texW = static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), texH = static_cast<float>(std::max<uint16_t>(s.textureHeight, 1));
         const auto texelUV = [&](const GSVertex &v, float &u, float &t)
         {
