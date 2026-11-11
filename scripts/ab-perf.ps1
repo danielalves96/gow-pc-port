@@ -98,12 +98,13 @@ $variantEnv = @{ A = (ConvertTo-Pairs $SetA '-SetA'); B = (ConvertTo-Pairs $SetB
 
 # The project never runs above 120 FPS (AGENTS.md): no uncapped runs. They kept the GPU at 100 % until the AMD OpenGL driver
 # crashed, and they measure nothing a player sees.
-foreach ($pairs in @($envSet, $variantEnv['A'], $variantEnv['B'])) {
+foreach ($capped in @($envSet, $variantEnv['A'], $variantEnv['B'])) {
+    # (not $pairs: PowerShell names are case-insensitive, and $Pairs is the [int] parameter)
     foreach ($name in @('PC_LOGIC_FPS', 'PC_WINDOW_FPS')) {
-        if (-not $pairs.Contains($name)) { continue }
+        if (-not $capped.Contains($name)) { continue }
         $value = 0
-        if (-not [int]::TryParse([string]$pairs[$name], [ref]$value) -or $value -gt 120 -or ($name -eq 'PC_WINDOW_FPS' -and $value -le 0)) {
-            throw "$name=$($pairs[$name]) is above the 120 FPS cap (or unlimited): the project never runs above 120 FPS"
+        if (-not [int]::TryParse([string]$capped[$name], [ref]$value) -or $value -gt 120 -or ($name -eq 'PC_WINDOW_FPS' -and $value -le 0)) {
+            throw "$name=$($capped[$name]) is above the 120 FPS cap (or unlimited): the project never runs above 120 FPS"
         }
     }
 }
