@@ -328,6 +328,15 @@ void VU1NativeAccess::exportFlags(VU1Interpreter &vu)
 // same value), but their timing state stays: the flag queue, and FDIV/EFU marked busy until their ready cycle.
 void VU1NativeAccess::commitValuesKeepTiming(VU1Interpreter &vu)
 {
+    // GOW-Port: nothing but flags in flight (the usual state at a callout): the general path below would commit nothing, since it
+    // hides the flag queue from commitEverythingNow and restores it, and would leave the pipelines empty and the next commit
+    // cycle at "never" (commitReadyPipelines' flags-only branch). That is all the state it changes, so set it directly.
+    if ((vu.m_storePending | vu.m_vfPending | vu.m_viPending | vu.m_accPending) == 0u && !vu.m_fdiv.valid &&
+        !vu.m_efu[0].valid && !vu.m_efu[1].valid)
+    {
+        vu.m_nextCommitCycle = ~0ull;
+        return;
+    }
     const uint32_t flagHead = vu.m_flagHead, flagCount = vu.m_flagCount;
     const VU1Interpreter::ScalarPipelineEntry fdiv = vu.m_fdiv;
     const auto efu = vu.m_efu;
