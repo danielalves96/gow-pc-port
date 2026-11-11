@@ -61,19 +61,19 @@ namespace
 
 void GSProducerLock::lockSlow()
 {
-    for (unsigned spins = 0u;; ++spins)
+    // A short spin first: the holder usually releases within a few hundred cycles.
+    for (unsigned spins = 0u; spins < 256u; ++spins)
     {
         uint32_t expected = 0u;
         if (m_state.load(std::memory_order_relaxed) == 0u &&
             m_state.compare_exchange_strong(expected, 1u, std::memory_order_acquire, std::memory_order_relaxed))
             return;
-        if (spins < 256u)
-            _mm_pause();
-        else if (spins < 512u)
-            std::this_thread::yield();
-        else
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        _mm_pause();
     }
+    // Then announce a waiter (state 2) and block until an unlock wakes us. Taking the lock as 2 keeps the wake chain going
+    // for any other waiter (one extra notify at most when there is none).
+    while (m_state.exchange(2u, std::memory_order_acquire) != 0u)
+        m_state.wait(2u, std::memory_order_relaxed);
 }
 
 GSThreadedBackend::GSThreadedBackend(std::unique_ptr<GSRasterBackend> inner)

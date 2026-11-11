@@ -87,7 +87,10 @@ private:
 // a second in combat) and nobody else does in the steady state, so an uncontended std::mutex (an SRW lock: two calls into
 // ntdll with an interlocked operation each) was ~7 % of that thread. One interlocked operation to take it and a plain store
 // to release. Contended (another thread issuing a barrier while the stage fills the queue, or the holder waiting for room
-// in PublishLocked) it spins briefly and then sleeps in short steps, so a long wait never burns a core.
+// in PublishLocked) it spins briefly and then blocks on the state word (std::atomic wait): state 0 free, 1 held, 2 held with
+// waiters (the classic futex mutex). Only an unlock that finds waiters wakes one, so the uncontended path stays one interlocked
+// operation each way. It must not poll with sleeps: on Windows a sleep lasts at least ~1 ms (15.6 ms without a raised timer
+// resolution), and a waiter that polls that way stalled whole frames in heavy scenes.
 class GSProducerLock
 {
 public:
@@ -98,7 +101,11 @@ public:
             return;
         lockSlow();
     }
-    void unlock() { m_state.store(0u, std::memory_order_release); }
+    void unlock()
+    {
+        if (m_state.exchange(0u, std::memory_order_release) == 2u)
+            m_state.notify_one();
+    }
 
 private:
     void lockSlow();
