@@ -43,12 +43,19 @@ pub struct Codegen {
     pub register_locals: bool,
     /// COP0 Count reads and writes go to the EE cycle counter (PS2Runtime::eeCountRegister) instead of a frozen field.
     pub cop0_count_clock: bool,
+    /// Generated functions take `R5900Context *__restrict ctx`: guest RAM (`rdram`) never holds the register file, so the
+    /// compiler keeps guest registers in host registers across guest stores (idea from gta-vcs-recomp).
+    pub restrict_ctx: bool,
+    /// `ctx->pc` stored only where something can read it: not before pure ALU / FPU / MMI instructions or RAM accesses
+    /// (those pass their pc to the slow path as `ps2AccessPc`), not around delay slots that read no pc, not before forward
+    /// gotos or dispatched calls. Back edges, device accesses, syscalls and tail calls keep theirs.
+    pub lean_pc: bool,
 }
 
 impl Codegen {
     /// The switches `mode = "gow"` turns on.
     pub fn gow() -> Self {
-        Self { movz_low64: true, register_locals: false, cop0_count_clock: true }
+        Self { movz_low64: true, register_locals: false, cop0_count_clock: true, restrict_ctx: true, lean_pc: true }
     }
 
     /// True when every switch is off: the output is PS2Recomp's.
@@ -336,6 +343,12 @@ impl RecompilerConfig {
             if let Some(value) = optional_bool(codegen, "cop0_count_clock") {
                 config.codegen.cop0_count_clock = value;
             }
+            if let Some(value) = optional_bool(codegen, "restrict_ctx") {
+                config.codegen.restrict_ctx = value;
+            }
+            if let Some(value) = optional_bool(codegen, "lean_pc") {
+                config.codegen.lean_pc = value;
+            }
         }
 
         Ok((config, report))
@@ -380,6 +393,8 @@ impl RecompilerConfig {
             codegen.insert("movz_low64".to_owned(), Value::Boolean(self.codegen.movz_low64));
             codegen.insert("register_locals".to_owned(), Value::Boolean(self.codegen.register_locals));
             codegen.insert("cop0_count_clock".to_owned(), Value::Boolean(self.codegen.cop0_count_clock));
+            codegen.insert("restrict_ctx".to_owned(), Value::Boolean(self.codegen.restrict_ctx));
+            codegen.insert("lean_pc".to_owned(), Value::Boolean(self.codegen.lean_pc));
             root.insert("codegen".to_owned(), Value::Table(codegen));
         }
 

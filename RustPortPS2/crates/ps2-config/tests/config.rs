@@ -201,6 +201,22 @@ movz_low64 = false
     )
     .unwrap();
     assert!(!off.codegen.movz_low64, "a switch written in the section wins over the mode");
+    assert!(off.codegen.restrict_ctx && off.codegen.lean_pc, "the other switches keep the mode's value");
+
+    let (plain, _) = RecompilerConfig::from_toml_str(
+        &format!(
+            "{base}[codegen]
+mode = \"gow\"
+restrict_ctx = false
+lean_pc = false
+"
+        ),
+        "test",
+    )
+    .unwrap();
+    assert!(!plain.codegen.restrict_ctx && !plain.codegen.lean_pc);
+    let (plain_again, _) = RecompilerConfig::from_toml_str(&plain.to_toml_string().unwrap(), "test").unwrap();
+    assert_eq!(plain_again.codegen, plain.codegen, "both switches survive a save");
 
     let (bad, report) = RecompilerConfig::from_toml_str(
         &format!(

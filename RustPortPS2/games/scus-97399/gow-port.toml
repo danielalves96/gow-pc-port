@@ -1707,3 +1707,7 @@ critical = [
 mode = "gow"
 # register_locals = true: guest GPRs in C++ locals (ps2xRuntime/include/ps2_cg.h). Measured 4-6 % slower on the EE with
 # clang (the reloads after every call cost more than the locals save), so it stays off.
+# restrict_ctx and lean_pc (on in "gow"): `R5900Context* __restrict ctx`, and `ctx->pc` stored only where the runtime can
+# read it (emit/lean.rs; device accesses pass their pc to the slow path). With the one-compare guest memory access and the
+# inline call dispatch of the runtime (GOW_FAST_DISPATCH=0 turns that off): EE -18 % at 60 FPS, 97.6 -> 106.7 FPS at the
+# 240 FPS limit on 4 cores (3 alternating pairs of 150 s, scripts/ab-perf.ps1).

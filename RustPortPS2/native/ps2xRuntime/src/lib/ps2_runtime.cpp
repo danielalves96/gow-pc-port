@@ -253,9 +253,8 @@ namespace
     };
 
     thread_local DispatchHistory g_dispatchHistory;
-    // GOW-Port: counts the jumps (not calls) dispatched, to tell an implicit return from a final jump
-    // that goes back to the entry of the called function (SotC fork, c4c20e8).
-    thread_local uint64_t g_guestJumpSerial = 0u;
+    // GOW-Port: g_guestJumpSerial moved out of this namespace (declared in ps2_runtime.h): the inline call fast path
+    // of dispatchGuestBranch reads it too.
 
     bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
     {
@@ -1518,9 +1517,30 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
-// GOW-Port branch trace ring
-struct GowBranchRec { uint32_t src, dst, ra, kind; };
+// GOW-Port branch trace ring (GowBranchRec in ps2_runtime.h: the inline call fast path writes it too)
 GowBranchRec g_gowRing[256]; std::atomic<uint32_t> g_gowRingPos{0};
+
+// GOW-Port: counts the jumps (not calls) dispatched, to tell an implicit return from a final jump
+// that goes back to the entry of the called function (SotC fork, c4c20e8).
+thread_local uint64_t g_guestJumpSerial = 0u;
+
+// GOW-Port: the inline call fast path of dispatchGuestBranch (ps2_runtime.h). Off with GOW_FAST_DISPATCH=0, and while
+// a diagnostic that needs every guest entry is on (GOW_GAP_DIAG, PS2X_GS_WORKER_TRACE). Calls to the frame function
+// (GOW_PERF_FRAME_PC) always take the slow path, which counts them for GOW_PERF_DIAG / GOW_FRAME_DIAG.
+bool g_ps2DispatchFast = [] {
+    const char *off = std::getenv("GOW_FAST_DISPATCH");
+    if (off && off[0] == '0')
+        return false;
+    const char *gap = std::getenv("GOW_GAP_DIAG");
+    if (gap && std::atof(gap) > 0.0)
+        return false;
+    return std::getenv("PS2X_GS_WORKER_TRACE") == nullptr;
+}();
+static_assert(kGuestDispatchCyclesInline == EeScheduler::kGuestDispatchCycles, "inline dispatch charges what the slow path does");
+uint32_t g_ps2DispatchWatchPc = [] {
+    const char *value = std::getenv("GOW_PERF_FRAME_PC");
+    return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 0xFFFFFFFFu;
+}();
 void gowDumpBranchRing(const char *why)
 {
     uint32_t pos = g_gowRingPos.load();
@@ -1531,7 +1551,7 @@ void gowDumpBranchRing(const char *why)
         std::fprintf(stderr, "  src=%08x dst=%08x ra=%08x kind=%u\n", r.src, r.dst, r.ra, r.kind);
     }
 }
-bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+bool PS2Runtime::dispatchGuestBranchSlow(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
                                      uint32_t sourcePc,
@@ -2795,3 +2815,68 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("[run] exiting loop");
 }
+
+// GOW-Port: the out-of-line half of the guest load / store macros (ps2_runtime_macros.h): every address the inline
+// RAM / scratchpad test did not take, handled as the macros did before - the device path for special addresses (with
+// the access's pc in ctx->pc when the generated code passed one), the masked RAM access for the rest.
+namespace
+{
+    template <typename T>
+    inline T ps2SlowLoadRam(const uint8_t *rdram, uint32_t addr)
+    {
+        if constexpr (sizeof(T) == 1)
+            return Ps2FastRead8(rdram, addr);
+        else if constexpr (sizeof(T) == 2)
+            return Ps2FastRead16(rdram, addr);
+        else if constexpr (sizeof(T) == 4)
+            return Ps2FastRead32(rdram, addr);
+        else if constexpr (sizeof(T) == 8)
+            return Ps2FastRead64(rdram, addr);
+        else
+            return Ps2FastRead128(rdram, addr);
+    }
+
+    template <typename T>
+    inline void ps2SlowStoreRam(uint8_t *rdram, uint32_t addr, T value)
+    {
+        if constexpr (sizeof(T) == 1)
+            Ps2FastWrite8(rdram, addr, value);
+        else if constexpr (sizeof(T) == 2)
+            Ps2FastWrite16(rdram, addr, value);
+        else if constexpr (sizeof(T) == 4)
+            Ps2FastWrite32(rdram, addr, value);
+        else if constexpr (sizeof(T) == 8)
+            Ps2FastWrite64(rdram, addr, value);
+        else
+            Ps2FastWrite128(rdram, addr, value);
+    }
+}
+
+#define GOW_DEFINE_SLOW_ACCESS(T, N)                                                                                   \
+    T Ps2ReadSlow##N(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, uint32_t accessPc)       \
+    {                                                                                                                \
+        if (!PS2Runtime::isSpecialAddress(addr))                                                                     \
+            return ps2SlowLoadRam<T>(rdram, addr);                                                                   \
+        if (accessPc != 0u)                                                                                          \
+            ctx->pc = accessPc;                                                                                      \
+        return runtime->Load##N(rdram, ctx, addr);                                                                   \
+    }                                                                                                                \
+    void Ps2WriteSlow##N(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, T value,             \
+                         uint32_t accessPc)                                                                          \
+    {                                                                                                                \
+        if (!PS2Runtime::isSpecialAddress(addr))                                                                     \
+        {                                                                                                            \
+            ps2SlowStoreRam<T>(rdram, addr, value);                                                                  \
+            return;                                                                                                  \
+        }                                                                                                            \
+        if (accessPc != 0u)                                                                                          \
+            ctx->pc = accessPc;                                                                                      \
+        runtime->Store##N(rdram, ctx, addr, value);                                                                  \
+    }
+
+GOW_DEFINE_SLOW_ACCESS(uint8_t, 8)
+GOW_DEFINE_SLOW_ACCESS(uint16_t, 16)
+GOW_DEFINE_SLOW_ACCESS(uint32_t, 32)
+GOW_DEFINE_SLOW_ACCESS(uint64_t, 64)
+GOW_DEFINE_SLOW_ACCESS(__m128i, 128)
+#undef GOW_DEFINE_SLOW_ACCESS

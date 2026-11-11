@@ -62,6 +62,7 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 | `GOW_GS_EARLY_FINISH=0` | Turns off early FINISH (on by default with the worker): the frame's FINISH is then given when the GS reaches it ([`RENDERING.md`](RENDERING.md)) |
 | `GOW_STALL_DIAG=1` | While a game frame is more than 40 ms late, samples the main thread's live pc/ra; one `[gow-stall]` line per late frame with the gap, display swaps, VBlanks and the most frequent places |
 | `GOW_LOADER_DIAG=1` | Adds the level loader (0x185A20), its disc reads and the 989snd command count to the `[gow-hang]` report |
+| `GOW_FAST_DISPATCH=0` | Turns off the inline call dispatch of the generated code (`dispatchGuestBranch` in `ps2_runtime.h`); every guest call then goes through the slow path. Also off with `GOW_GAP_DIAG` or `PS2X_GS_WORKER_TRACE`, and for the `GOW_PERF_FRAME_PC` function |
 | `GOW_EE_WAIT=1` | The EE sleeps while waiting for the frame (changes game pacing) |
 | `PS2X_IOP_NATIVE`, `PS2X_IOP_NATIVE_STATS` | Native IOP module use and its hit statistics |
 | `PS2X_THREAD_PRIORITY` | Thread priority policy |

@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use ps2_r5900::opcodes::*;
 use ps2_r5900::Instruction;
 
+use crate::emit::lean::lean_statement;
 use crate::emit::locals::{build_body, Chunk, ChunkKind};
 use crate::flow::emitter::ControlFlowEmitter;
 use crate::generator::{CodeGenerator, GenerationError};
@@ -68,7 +69,16 @@ pub fn emit_function(
         sanitized_name = format!("Errorfunc_{:x}", function.start);
     }
 
-    let _ = writeln!(ss, "void {sanitized_name}(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {{");
+    // GOW-Port (decision D2): `[codegen] restrict_ctx` and `lean_pc` (emit/lean.rs). A function with a branch whose
+    // delay slot is itself a branch target keeps every pc store: the delay-slot entry tests `ctx->pc` in the normal flow.
+    let codegen = cg.codegen();
+    let restrict = if codegen.restrict_ctx { "__restrict " } else { "" };
+    let lean = codegen.lean_pc
+        && !codegen.register_locals
+        && !instructions
+            .iter()
+            .any(|inst| inst.has_delay_slot && analysis.entry_points.contains(&inst.address.wrapping_add(4)));
+    let _ = writeln!(ss, "void {sanitized_name}(uint8_t* rdram, R5900Context* {restrict}ctx, PS2Runtime *runtime) {{");
     ss.push_str("#ifdef PS2_FUNCTION_LOG_TRACKER\n");
     let _ = writeln!(ss, "    PS_LOG_ENTRY(\"{sanitized_name}\");");
     ss.push_str("#endif\n");
@@ -140,13 +150,13 @@ pub fn emit_function(
                 let override_code = gif_dma_delay_slot_override(delay_slot, &gif_dma_kick_plan, emit_comments);
                 push(
                     ChunkKind::Branch,
-                    ControlFlowEmitter::new(cg, inst, delay_slot, function, &analysis, override_code).emit(),
+                    ControlFlowEmitter::new(cg, inst, delay_slot, function, &analysis, override_code).lean(lean).emit(),
                 );
                 gif_dma_kick_plan = GifDmaKickPlan::default();
             } else {
                 push(
                     ChunkKind::Branch,
-                    ControlFlowEmitter::new(cg, inst, delay_slot, function, &analysis, String::new()).emit(),
+                    ControlFlowEmitter::new(cg, inst, delay_slot, function, &analysis, String::new()).lean(lean).emit(),
                 );
             }
 
@@ -178,9 +188,17 @@ pub fn emit_function(
             }
 
             let mut statement = String::new();
-            let _ = writeln!(statement, "    ctx->pc = 0x{:x}u;", inst.address);
             let memory_hint = resolve_memory_access_hint(inst, &constant_registers);
-            let _ = write!(statement, "    {}", cg.translate_instruction_with_hint(inst, memory_hint));
+            let translation = cg.translate_instruction_with_hint(inst, memory_hint);
+            match lean.then(|| lean_statement(inst, &translation)).flatten() {
+                Some(lean_text) => {
+                    let _ = write!(statement, "    {lean_text}");
+                }
+                None => {
+                    let _ = writeln!(statement, "    ctx->pc = 0x{:x}u;", inst.address);
+                    let _ = write!(statement, "    {translation}");
+                }
+            }
             if inst.is_mmio {
                 let _ = write!(statement, " // MMIO: 0x{:x}", inst.mmio_address);
             }
