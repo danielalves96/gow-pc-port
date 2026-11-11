@@ -90,6 +90,47 @@ namespace
         return forced >= 0 ? static_cast<uint64_t>(forced) : value;
     }
 
+    // GOW-Port: copies every field of a GSContext without touching its padding bytes (see buildDrawBatch). The asserts fail
+    // when a field is added to one of these structs, as a reminder to copy it here too.
+    static_assert(sizeof(GSContext) == 112 && sizeof(GSFrameReg) == 16 && sizeof(GSScissorReg) == 8 &&
+                      sizeof(GSTex0Reg) == 20 && sizeof(GSXYOffsetReg) == 4 && sizeof(GSZbufReg) == 8,
+                  "GSContext changed: update copyContextFields");
+    inline void copyContextFields(GSContext &dst, const GSContext &src)
+    {
+        dst.frame.fbp = src.frame.fbp;
+        dst.frame.fbw = src.frame.fbw;
+        dst.frame.psm = src.frame.psm;
+        dst.frame.fbmsk = src.frame.fbmsk;
+        dst.scissor.x0 = src.scissor.x0;
+        dst.scissor.x1 = src.scissor.x1;
+        dst.scissor.y0 = src.scissor.y0;
+        dst.scissor.y1 = src.scissor.y1;
+        dst.tex0.tbp0 = src.tex0.tbp0;
+        dst.tex0.tbw = src.tex0.tbw;
+        dst.tex0.psm = src.tex0.psm;
+        dst.tex0.tw = src.tex0.tw;
+        dst.tex0.th = src.tex0.th;
+        dst.tex0.tcc = src.tex0.tcc;
+        dst.tex0.tfx = src.tex0.tfx;
+        dst.tex0.cbp = src.tex0.cbp;
+        dst.tex0.cpsm = src.tex0.cpsm;
+        dst.tex0.csm = src.tex0.csm;
+        dst.tex0.csa = src.tex0.csa;
+        dst.tex0.cld = src.tex0.cld;
+        dst.xyoffset.ofx = src.xyoffset.ofx;
+        dst.xyoffset.ofy = src.xyoffset.ofy;
+        dst.zbuf.zbp = src.zbuf.zbp;
+        dst.zbuf.psm = src.zbuf.psm;
+        dst.zbuf.zmask = src.zbuf.zmask;
+        dst.tex1 = src.tex1;
+        dst.miptbp1 = src.miptbp1;
+        dst.miptbp2 = src.miptbp2;
+        dst.clamp = src.clamp;
+        dst.alpha = src.alpha;
+        dst.test = src.test;
+        dst.fba = src.fba;
+    }
+
     bool gowFogOff()
     {
         static const bool off = []
@@ -2088,7 +2129,11 @@ GSPrimitiveBatch GS::buildDrawBatch(int vertexCount) const
     batch.vertexCount = static_cast<uint8_t>(std::min(vertexCount, 3));
     for (int i = 0; i < batch.vertexCount; ++i)
         batch.vertices[static_cast<size_t>(i)] = m_vtxQueue[i];
-    batch.state.context = m_ctx[m_prim.ctxt ? 1 : 0];
+    // GOW-Port: the draw state is built from zeroed bytes and filled field by field (never by copying a padded struct), so
+    // its padding is always zero. GSThreadedBackend::Enqueue then decides "same state as the previous draw" with one memcmp
+    // instead of the out-of-line field-by-field operator== (3 % of the stage thread); the fields are the same.
+    std::memset(&batch.state, 0, sizeof(batch.state));
+    copyContextFields(batch.state.context, m_ctx[m_prim.ctxt ? 1 : 0]);
     batch.state.prim = m_prim;
     if (gowFogOff())
         batch.state.prim.fge = false; // GOW-Port: PS2X_GS_FOG_OFF.
