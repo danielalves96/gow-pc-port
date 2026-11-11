@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "imports/iop_cdvd.h"
 #include "core/iop_cpu.h"
+#include "core/iop_cpu_exec.h"
 #include "imports/iop_heaplib.h"
 #include "imports/iop_imports.h"
 #include "imports/iop_intrman.h"
@@ -529,6 +530,51 @@ namespace ps2x::iop::detail
             return running;
         }
 
+        // GOW-Port: runs plain interpreted instructions in a tight loop (the interpreter inlined, no per-instruction call
+        // chain) and stops, before executing anything, at the first instruction that step() treats differently: a jr ra
+        // (possible import stub), an override address, compiled code, a pending interrupt, or when a DMA / guest
+        // callback is queued (runCpu services those after every instruction). Everything it executes is exactly what
+        // step() does for a plain instruction, so the behaviour is unchanged. Returns the instructions executed.
+        uint32_t runInterpretedBurst(CpuState &cpu, uint32_t maxInstructions)
+        {
+            if (maxInstructions == 0u || !nativeRanges.empty() || pcEvery != 0ULL)
+                return 0u;
+            uint32_t done = 0u;
+            while (done < maxInstructions)
+            {
+                if (cpu.stopped || cpu.yielded)
+                    break;
+                const uint32_t pc = cpu.pc;
+                if (pc == kThreadReturnSentinel || pc == kCallReturnSentinel || physicalAddress(pc) >= kRamSize)
+                    break;
+                if ((cpu.cop0[12] & 3u) == 1u && memory.interruptControl() != 0u &&
+                    (memory.interruptStatus() & memory.interruptMask()) != 0u)
+                    break;
+                const uint32_t word = memory.fetch32(pc);
+                if (word == 0x03E00008u)
+                    break;
+                if (overrideBit(physicalAddress(pc)))
+                    break;
+                const bool running = iopExecute(cpu, memory, word, pc);
+                ++interpretedInstructions;
+                ++totalInstructions;
+                ++totalCycles;
+                ++done;
+                schedulePendingDma();
+                if (!running)
+                    break;
+                // runCpu services whatever became due after every instruction
+                if (!pendingGuestCallbacks.empty() && pendingGuestCallbacks.begin()->first <= totalCycles)
+                    break;
+                bool dmaDue = false;
+                for (const auto &entry : pendingDmaInterrupts)
+                    dmaDue |= entry.second <= totalCycles;
+                if (dmaDue)
+                    break;
+            }
+            return done;
+        }
+
         uint32_t runCpu(CpuState &cpu, uint32_t instructionBudget)
         {
             CpuState *previous = activeCpu;
@@ -543,6 +589,17 @@ namespace ps2x::iop::detail
                     servicePendingDmaInterrupts();
                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
                     servicePendingGuestCallbacks();
+                if (!cpu.stopped && !cpu.yielded && totalInstructions - start < instructionBudget &&
+                    runInterpretedBurst(cpu, static_cast<uint32_t>(instructionBudget - (totalInstructions - start))) != 0u)
+                {
+                    if (cpu.stopped)
+                        break; // as when step() returns false
+                    // the same servicing the loop does after each instruction
+                    if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
+                        servicePendingDmaInterrupts();
+                    if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
+                        servicePendingGuestCallbacks();
+                }
             }
             activeCpu = previous;
             return static_cast<uint32_t>(totalInstructions - start);
@@ -895,6 +952,7 @@ namespace ps2x::iop::detail
             module.gp = loaded.gp;
             module.textSize = loaded.textSize != 0u && loaded.textSize <= loaded.size ? loaded.textSize : loaded.size;
             attachNative(module);
+            imports.invalidateDecodeCache(); // GOW-Port: a new import table may change what a stub resolves to
 
             // GOW-Port: like the real loadcore, the module starts with start(argc, argv): argv[0] is the module's
             // path and the arguments come separated by '\0' ("rpc_priority=64\0..."). Before, it passed

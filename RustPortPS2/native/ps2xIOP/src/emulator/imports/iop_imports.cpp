@@ -42,6 +42,7 @@ namespace ps2x::iop::detail
 
     void IopImportRegistry::reset()
     {
+        m_decodeCache.clear();
         m_libraries.clear();
     }
 
@@ -53,6 +54,29 @@ namespace ps2x::iop::detail
         if ((delay & 0xFFFF0000u) != 0x24000000u)
             return std::nullopt;
 
+        const uint32_t physicalPc = IopMemory::physicalAddress(pc);
+        if (const auto cached = m_decodeCache.find(physicalPc); cached != m_decodeCache.end() && cached->second.delay == delay)
+        {
+            const DecodeEntry &entry = cached->second;
+            if (!entry.call)
+                return std::nullopt;
+            // the table that was found must still be there with the same library name and version
+            bool same = m_memory.read32(entry.table) == kImportMagic &&
+                        m_memory.read16(entry.table + 8u) == entry.call->version;
+            for (uint32_t i = 0; same && i < entry.call->library.size(); ++i)
+                same = static_cast<char>(m_memory.read8(entry.table + 12u + i)) == entry.call->library[i];
+            if (same && (entry.call->library.size() >= 8u || m_memory.read8(entry.table + 12u + static_cast<uint32_t>(entry.call->library.size())) == 0u))
+                return entry.call;
+            m_decodeCache.erase(cached);
+        }
+        uint32_t table = 0u;
+        std::optional<IopImportCall> result = decodeUncached(pc, delay, table);
+        m_decodeCache[physicalPc] = DecodeEntry{table, delay, result};
+        return result;
+    }
+
+    std::optional<IopImportCall> IopImportRegistry::decodeUncached(uint32_t pc, uint32_t delay, uint32_t &tableOut) const
+    {
         const uint32_t physicalPc = IopMemory::physicalAddress(pc);
         const uint32_t searchBegin = physicalPc > 0x10000u ? physicalPc - 0x10000u : 0u;
         for (uint32_t candidate = physicalPc & ~3u; candidate >= searchBegin + 20u; candidate -= 4u)
@@ -89,6 +113,7 @@ namespace ps2x::iop::detail
             }
             if (valid)
             {
+                tableOut = table;
                 return IopImportCall{
                     trimLibraryName(name),
                     static_cast<uint16_t>(delay & 0xFFFFu),
@@ -184,6 +209,7 @@ namespace ps2x::iop::detail
 
     void IopImportRegistry::eraseRange(uint32_t base, uint32_t size)
     {
+        m_decodeCache.clear();
         for (auto library = m_libraries.begin(); library != m_libraries.end();)
         {
             if (library->first >= base && library->first < base + size)
