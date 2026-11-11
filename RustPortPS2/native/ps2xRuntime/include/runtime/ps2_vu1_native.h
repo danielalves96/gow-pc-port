@@ -88,6 +88,9 @@ struct VU1NativeCtx
     uint32_t pc = 0;
     VU1FlagRing *macRing = nullptr, *clipRing = nullptr;
     VU1FlagTail *tail = nullptr; // the running block's tail record (blocks with a VU1TailDesc)
+    // GOW-Port: loop folding (see VU1NativeLoopFn): the running block's tail descriptor and its length in cycles on the idle table.
+    const VU1TailDesc *tailDesc = nullptr;
+    uint32_t loopLen = 0;
 };
 
 // Return value of a native block: next pc in the low 16 bits; kEnded when the program finished; kBail when the exact
@@ -95,11 +98,17 @@ struct VU1NativeCtx
 constexpr uint32_t kVu1nEnded = 0x80000000u;
 constexpr uint32_t kVu1nBail = 0x40000000u;
 using VU1NativeFn = uint32_t (*)(VU1NativeCtx &);
+// GOW-Port: loop-folded variant of a block that branches back to its own first pair (ps2-tools vu1n-gen, gen_loop). Runs up to
+// maxIter iterations in one call (the runtime passes the number the cycle budget allows) and returns `iterations << 32 | next pc`
+// (at least one iteration). Between iterations it does what the runtime does between two dispatches of an idle-table block that
+// started no callout (n.start += n.loopLen, the tail record of iteration i in the history slot of that iteration); the rest
+// (history entries, FDIV timing and retire, cycle count) is VU1NativeAccess::foldIterations, run once by the runtime afterwards.
+using VU1NativeLoopFn = uint64_t (*)(VU1NativeCtx &, uint32_t maxIter);
 
 // Registered by the generated tables: key = FNV-1a over the block words (not the pc: the same code at another address reuses
 // the block), see vu1n::blockKey. pairs: block length in the
 // low 16 bits, bit 16 set when the block reads MAC/clip flags written before it (it then needs exact entry timing).
-void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail);
+void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, VU1NativeLoopFn loop = nullptr);
 
 struct VU1Interpreter::NativeState
 {
@@ -140,6 +149,7 @@ struct VU1Interpreter::NativeState
         const uint8_t *idle = nullptr;
         BlockTiming *bt = nullptr;
         const VU1TailDesc *tail = nullptr;
+        VU1NativeLoopFn loopFn = nullptr; // set only when folding is exact for this slot (see slotFor)
         uint16_t pairs = 0;
         uint16_t idleEnd = 0; // idle[pairs - 1] + 1: the block's length in cycles with an idle pipeline
         bool known = false;
@@ -208,6 +218,11 @@ struct VU1NativeAccess
                                    uint32_t pc, uint32_t count, const uint8_t *idle);
     static const uint8_t *blockTiming(VU1Interpreter &vu, VU1Interpreter::NativeState::Slot &sl, uint32_t &cycId);
     static void scalarStart(VU1Interpreter &vu, uint64_t issue, uint32_t latency, bool fdiv);
+    // Loop folding: the tail record of iteration `it` of a folded run (the history slot that iteration would get), and the
+    // bookkeeping of `iters` iterations that the folded function leaves to the runtime.
+    static VU1FlagTail *loopTail(VU1NativeCtx &n, uint32_t it);
+    static void foldIterations(VU1Interpreter &vu, const VU1Interpreter::NativeState::Slot &sl, uint64_t start, uint32_t iters);
+    static void retireScalars(VU1Interpreter &vu);
     static VU1Interpreter::NativeState::Slot &slotFor(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize, uint32_t pc);
     static void codeChanged(VU1Interpreter::NativeState &ns, const uint8_t *code); // micro memory (16 KB) rewritten
     static uint64_t &laneWord(VU1Interpreter &vu, uint32_t lane);
@@ -284,6 +299,17 @@ VU1N_INLINE void VU1NativeAccess::ringPush(VU1Interpreter::NativeState::FlagRing
     r.mask[r.next] = 0u;
     r.tail[r.next] = nullptr;
     r.next = (r.next + 1u) & 3u;
+}
+
+VU1N_INLINE VU1FlagTail *VU1NativeAccess::loopTail(VU1NativeCtx &n, uint32_t it)
+{
+    using NS = VU1Interpreter::NativeState;
+    NS &ns = *n.vu->m_native;
+    VU1FlagTail &t = ns.hist[(ns.histNext + it) % NS::kHist].tail;
+    t.desc = n.tailDesc;
+    t.cyc = n.cyc;
+    t.start = n.start;
+    return &t;
 }
 
 VU1N_INLINE uint32_t VU1NativeAccess::macAt(VU1NativeCtx &n, uint32_t rel) { return ringAt(*n.macRing, n.start + rel); }
