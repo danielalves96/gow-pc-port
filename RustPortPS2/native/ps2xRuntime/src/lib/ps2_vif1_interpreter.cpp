@@ -241,18 +241,27 @@ namespace
 // GOW-Port: UNPACK without mask and with CL >= WL, specialized by format (VL, components) and STMOD. It writes the same as the
 // general loop of processVIF1Data (the components the format does not bring keep their previous value; V2 repeats XY).
 // VL 3 is V4-5 (VN 3), which ignores STMOD.
-template <uint32_t VL, uint32_t COMP, uint32_t MODE>
+// GOW-Port: CONTIG is CL == WL (what the game uses): the destination vector of write i is then (vuAddr + i) & 0x3FF, because
+// block * CL + cyclePos == (i / WL) * WL + i % WL == i. It drops the block / cycle counters from the loop (about 7 of the ~12
+// scalar operations per vector in the V4-16 / V4-8 loops); the vectors written and their values are the same.
+template <uint32_t VL, uint32_t COMP, uint32_t MODE, bool CONTIG>
 void unpackUnmasked(uint8_t *vuData, const uint8_t *src, uint32_t bytesPerVector, uint32_t count, uint32_t vuAddr,
                       uint32_t cl, uint32_t wl, bool zeroExtend, uint32_t *row)
 {
     uint32_t block = 0u, cyclePos = 0u;
     for (uint32_t i = 0; i < count; ++i, src += bytesPerVector)
     {
-        const uint32_t destVec = (vuAddr + block * cl + cyclePos) & 0x3FFu;
-        if (++cyclePos == wl)
+        uint32_t destVec;
+        if constexpr (CONTIG)
+            destVec = (vuAddr + i) & 0x3FFu;
+        else
         {
-            cyclePos = 0u;
-            ++block;
+            destVec = (vuAddr + block * cl + cyclePos) & 0x3FFu;
+            if (++cyclePos == wl)
+            {
+                cyclePos = 0u;
+                ++block;
+            }
         }
         uint8_t *dst = vuData + destVec * 16u;
         // GOW-Port: without STMOD, V4-16 / V4-8 / V2-16 / V2-8 (the formats that weigh most in combat) are a conversion of
@@ -373,25 +382,35 @@ void unpackUnmasked(uint8_t *vuData, const uint8_t *src, uint32_t bytesPerVector
     }
 }
 
-template <uint32_t VL, uint32_t COMP>
-void unpackUnmaskedMode(uint32_t mode, uint8_t *vuData, const uint8_t *src, uint32_t bytesPerVector, uint32_t count,
-                          uint32_t vuAddr, uint32_t cl, uint32_t wl, bool zeroExtend, uint32_t *row)
+template <uint32_t VL, uint32_t COMP, bool CONTIG>
+void unpackUnmaskedModeC(uint32_t mode, uint8_t *vuData, const uint8_t *src, uint32_t bytesPerVector, uint32_t count,
+                           uint32_t vuAddr, uint32_t cl, uint32_t wl, bool zeroExtend, uint32_t *row)
 {
     switch (mode)
     {
     case 1u:
-        unpackUnmasked<VL, COMP, 1u>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
+        unpackUnmasked<VL, COMP, 1u, CONTIG>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
         break;
     case 2u:
-        unpackUnmasked<VL, COMP, 2u>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
+        unpackUnmasked<VL, COMP, 2u, CONTIG>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
         break;
     case 3u:
-        unpackUnmasked<VL, COMP, 3u>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
+        unpackUnmasked<VL, COMP, 3u, CONTIG>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
         break;
     default:
-        unpackUnmasked<VL, COMP, 0u>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
+        unpackUnmasked<VL, COMP, 0u, CONTIG>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
         break;
     }
+}
+
+template <uint32_t VL, uint32_t COMP>
+void unpackUnmaskedMode(uint32_t mode, uint8_t *vuData, const uint8_t *src, uint32_t bytesPerVector, uint32_t count,
+                          uint32_t vuAddr, uint32_t cl, uint32_t wl, bool zeroExtend, uint32_t *row)
+{
+    if (cl == wl)
+        unpackUnmaskedModeC<VL, COMP, true>(mode, vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
+    else
+        unpackUnmaskedModeC<VL, COMP, false>(mode, vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
 }
 
 // false if the format does not cover it (VL 3 except V4-5): the general loop handles it.
@@ -426,7 +445,10 @@ bool unpackUnmaskedDispatch(uint32_t vl, uint32_t vn, uint32_t mode, uint8_t *vu
     default:
         if (vn == 3u)
         {
-            unpackUnmasked<3u, 4u, 0u>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
+            if (cl == wl)
+                unpackUnmasked<3u, 4u, 0u, true>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
+            else
+                unpackUnmasked<3u, 4u, 0u, false>(vuData, src, bytesPerVector, count, vuAddr, cl, wl, zeroExtend, row);
             return true;
         }
         return false;
