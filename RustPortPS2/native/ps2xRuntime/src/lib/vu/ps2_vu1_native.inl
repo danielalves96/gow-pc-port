@@ -867,31 +867,36 @@ bool VU1Interpreter::runNative(StepContext &context)
         const uint8_t *cyc = sl.readsEntryFlags ? VU1NativeAccess::blockTiming(*this, sl, cycId) : sl.idle;
         ctx.cyc = cyc;
         ctx.pc = pc; // GOW-Port: position independent blocks add their offsets to it
-        // GOW-Port: a block that jumps back to its own start (the vertex loops are most of the VU1 time) and does not read
-        // entry flags runs again with the same slot, the same idle timing table (cycId 0) and no verify bookkeeping, so
-        // the next iteration skips the slot lookup, the miss / armed / limit tests and the timing-table choice. Everything
-        // else per block (start cycle, history entry, tail record, scalar timing, retire, stop / budget test) is the same
-        // as at the top of the loop, and the iteration only repeats when the top of the loop would take the same path.
+        // GOW-Port: blocks that do not read entry flags run on idle timing tables (cycId 0) and, with no verify bookkeeping
+        // (limit off), the next block can be entered without the armed / limit tests and the timing-table choice: a block
+        // that loops to its own start (the vertex loops are most of the VU1 time) or goes to another block that is already set
+        // up (the two-block vertex kernels) is dispatched right here. Everything per block that defines the result (start
+        // cycle, history entry, tail record, scalar timing, retire, stop / budget test, pc store) is the same as at the top
+        // of the loop and runs in the same order; the next block is entered here only when the top of the loop would take
+        // the same path for it (pc in range, slot known, native block present, no entry-flag reads).
         const bool repeat = !sl.readsEntryFlags && ns.limit == ~0u;
-        uint64_t iterations = 0u;
+        uint64_t pairsRun = 0u, blocksRun = 0u;
+        const NativeState::Slot *cs = &sl;
+        VU1NativeFn curFn = fn;
+        uint32_t curPc = pc;
         uint32_t result;
-        do
+        for (;;)
         {
             const uint64_t start = m_cycle;
             ctx.start = start;
-            if (sl.tail)
+            if (cs->tail)
             {
                 VU1FlagTail &t = ns.hist[ns.histNext].tail;
-                t.desc = sl.tail;
+                t.desc = cs->tail;
                 t.cyc = cyc;
                 t.start = start;
                 ctx.tail = &t;
             }
-            result = fn(ctx);
+            result = curFn(ctx);
             if (repeat)
-                VU1NativeAccess::finishBlockTiming<true>(*this, sl, cyc, cycId, start);
+                VU1NativeAccess::finishBlockTiming<true>(*this, *cs, cyc, cycId, start);
             else
-                VU1NativeAccess::finishBlockTiming<false>(*this, sl, cyc, cycId, start);
+                VU1NativeAccess::finishBlockTiming<false>(*this, *cs, cyc, cycId, start);
             if (m_cycle >= m_nextCommitCycle)
             {
                 // FDIV/EFU entries kept for timing retire when ready (values are written already). GOW-Port: inside the native
@@ -928,12 +933,31 @@ bool VU1Interpreter::runNative(StepContext &context)
                     m_nextCommitCycle = next;
                 }
             }
-            ++iterations;
+            pairsRun += cs->pairs;
+            ++blocksRun;
             m_state.pc = result & 0x3FFFu;
-        } while (repeat && (result & (kVu1nEnded | kVu1nBail)) == 0u && (result & 0x3FFFu) == pc && !m_stopRequested &&
-                 m_cycle < context.budgetEnd);
-        ns.nativePairs += iterations * sl.pairs;
-        ns.nativeBlocks += iterations;
+            if (!repeat || (result & (kVu1nEnded | kVu1nBail)) != 0u || m_stopRequested || m_cycle >= context.budgetEnd)
+                break;
+            const uint32_t nextPc = result & 0x3FF8u;
+            if (nextPc != curPc)
+            {
+                if ((result & 0x3FFFu) != nextPc || nextPc + 8u > context.codeSize)
+                    break;
+                const NativeState::Slot &next = ns.slots[nextPc >> 3];
+                if (!next.known || !next.fn || next.readsEntryFlags)
+                    break;
+                cs = &next;
+                curFn = next.fn;
+                curPc = nextPc;
+                cyc = next.idle;
+                ctx.cyc = cyc;
+                ctx.pc = nextPc;
+            }
+            else if ((result & 0x3FFFu) != nextPc)
+                break;
+        }
+        ns.nativePairs += pairsRun;
+        ns.nativeBlocks += blocksRun;
         if (result & kVu1nEnded)
         {
             context.programEnded = true;
