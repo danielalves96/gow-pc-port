@@ -26,6 +26,33 @@ static uint32_t b00e8_b1bbfe3f(VU1NativeCtx &n)
     return taken ? target : ((n.pc + 24u) & 0x3FFFu);
 }
 
+static uint64_t b00e8_b1bbfe3f_loop(VU1NativeCtx &n, uint32_t loopMax)
+{
+    VU1State &s = *n.s;
+    uint32_t loopIt = 0;
+    for (;;)
+    {
+        // pair 0 +0x0000 lower=017f2e07 upper=070ec61b
+        const __m128 v24_0 = vu1n::ldn(s, 24);
+        const __m128 v14_0 = vu1n::ldn(s, 14);
+        __m128 r0 = _mm_mul_ps(v24_0, vu1n::bc<3>(v14_0));
+        const uint32_t m0 = vu1n::macVal<1>(r0);
+        const __m128 q0 = r0;  // unclamped: flags computed later if it outlives the block
+        vu1n::stf<1>(s.vf[24], r0);
+        { uint32_t a = vu1n::qaddr(n, s.vi[5] + -505); vu1n::stf<13>(s.vf[31], vu1n::ldq(n, a)); }
+        // pair 1 +0x0008 lower=500007fe upper=000002ff
+        bool taken = (int16_t)s.vi[0] == (int16_t)s.vi[0];
+        uint32_t target = ((n.pc + 0u) & 0x3FFFu);
+        // pair 2 +0x0010 lower=00000000 upper=00000001
+        VU1NativeAccess::pushMacRaw(n, n.cyc[0], q0, 1u, nullptr);
+        const uint32_t loopResult = taken ? target : ((n.pc + 24u) & 0x3FFFu);
+        ++loopIt;
+        if (loopResult != n.pc || loopIt >= loopMax)
+            return (static_cast<uint64_t>(loopIt) << 32) | loopResult;
+        n.start += n.loopLen;
+    }
+}
+
 static uint32_t b0100_21b0275f(VU1NativeCtx &n)
 {
     VU1State &s = *n.s;
@@ -228,7 +255,7 @@ namespace
 {
     const bool g_registered = []
     {
-    vu1nRegisterBlock(0x0f2a33c3b1bbfe3full, b00e8_b1bbfe3f, 3u, nullptr);
+    vu1nRegisterBlock(0x0f2a33c3b1bbfe3full, b00e8_b1bbfe3f, 3u, nullptr, b00e8_b1bbfe3f_loop);
     vu1nRegisterBlock(0xc5c2ca5a21b0275full, b0100_21b0275f, 1u, nullptr);
     vu1nRegisterBlock(0xfdeef8879d67ccc7ull, b0000_9d67ccc7, 32u, &b0000_9d67ccc7_tail);
         return true;
