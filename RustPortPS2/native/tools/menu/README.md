@@ -5,7 +5,7 @@ The menus of *God of War* are an Adobe-Flash-style movie (`FLP_HUD`, AVM1 byteco
 *Options* and *Restart*; X on it opens a list (**Cheats**, **In Game Overlay**, **Image Adjustments** and Back), and each item opens a
 page built with the same plates, fonts and handlers: one ON/OFF row per cheat of the F2 menu, one per line of the performance overlay
 (FPS, GPU, CPU, RAM), or four sliders cloned from the game's volume rows (brightness, contrast, gamma, saturation) with Reset to
-Default, or the frame rate (FPS limit as a three-value row cloned from Sound Mode, VSync, Early FINISH), and Back. The Options page is left as the game has it.
+Default, or the frame rate (FPS limit as a two-value row, 60 / 120, cloned from Sound Mode, VSync, Early FINISH), and Back. The Options page is left as the game has it.
 The **title menu** (the movie `FLP_Shell`, the one after Press Start) gets the same item and the same pages: a fifth item, **Port
 Options**, after Treasures.
 The research and the design are in [`docs/dev/NATIVE_MENU_RESEARCH.md`](../../../../docs/dev/NATIVE_MENU_RESEARCH.md).

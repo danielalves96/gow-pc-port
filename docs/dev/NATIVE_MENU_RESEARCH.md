@@ -502,7 +502,8 @@ written back for the next session ("Persistence" below). What changed for the re
 
 ### Frame Rate integration (FPS limit, VSync, Early FINISH)
 
-`lib/gow_frame.h` (`gowFrameGet/Set/Available`, three indexes: 0 FPS limit as 0, 1, 2 = 60, 120, 240; 1 VSync; 2 Early FINISH) is the
+`lib/gow_frame.h` (`gowFrameGet/Set/Available`, three indexes: 0 FPS limit as 0, 1 = 60, 120 (it had a third value, 240, until the project capped every rate at 120); 1 VSync;
+2 Early FINISH) is the
 interface of the menus' fourth item, **Frame Rate**: three HUD variables (`PS2_FpsLimit`, `PS2_VSync`, `PS2_EarlyFinish`; the variable
 block grew to 416 bytes and the table to 190 of 191 entries). Each setting used to be read once at start-up, so making them change in
 game meant making every reader dynamic:
@@ -521,8 +522,9 @@ game meant making every reader dynamic:
   recompiled once) and `setGsEarlyFinish()` first drains the GS worker (`waitGsWorkerIdle`) so that no job queued under the old rule is
   left with a FINISH nobody raises (a job queued with early FINISH has its own FINISH writes skipped), then flips the flag. EE thread only;
   without the GS worker (`PS2X_GS_WORKER`) there is nothing to switch.
-* **Menus.** The FPS limit row is a clone of the Sound Mode row (`clone_select3` in `flp_patch_cheats.py`: its label plus one clip per value,
-  with the texts "60 FPS", "120 FPS", "240 FPS" in the style of Mono / Stereo / Surround); Left / Right / X cycle through the values like the
+* **Menus.** The FPS limit row is a clone of the Sound Mode row (`clone_selectN` in `flp_patch_cheats.py`: its label plus one clip per value,
+  with the texts "60 FPS" and "120 FPS" in the style of Mono / Stereo / Surround; a third value, "240 FPS", was removed with the
+  120 FPS cap); Left / Right / X cycle through the values like the
   stock row does. VSync and Early FINISH are toggle rows. In the pause menu the page is root-clip frames 32 and 33 (the Image page's layers
   are now removed at 32), `PausePort_State` 4 is the list row and 9 the open page, `PauseFrame_State` the sub-state. In the title menu it is
   root frames 158 and 159 (`ShellPort_Page` 4); its select row also shows and hides the arrows inside the three value clips, as

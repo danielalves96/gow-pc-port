@@ -47,10 +47,11 @@ M = len(OVERLAY)
 # gow_menu_diag.cpp (kVarNames) and gow_image.h (the order: brightness, contrast, gamma, saturation).
 IMAGE = [("ImgBrightness", "Brightness:"), ("ImgContrast", "Contrast:"), ("ImgGamma", "Gamma:"), ("ImgSaturation", "Saturation:")]
 K = len(IMAGE)
-# The Frame Rate page: the launcher's FPS limit (a three-way row, 60 / 120 / 240), VSync and Early FINISH. Variable PS2_<name>: FpsLimit
-# holds 0, 1 or 2, the others 0 / 1; shared with gow_menu_diag.cpp (kVarNames) and gow_frame.h.
+# The Frame Rate page: the launcher's FPS limit (a two-way row, 60 / 120: the project never runs the game above 120, see AGENTS.md),
+# VSync and Early FINISH. Variable PS2_<name>: FpsLimit holds 0 or 1, the others 0 / 1; shared with gow_menu_diag.cpp (kVarNames) and
+# gow_frame.h.
 FRAMERATE = [("FpsLimit", "FPS Limit:"), ("VSync", "VSync:"), ("EarlyFinish", "Early FINISH:")]
-FPS_VALUES = ["60 FPS", "120 FPS", "240 FPS"]
+FPS_VALUES = ["60 FPS", "120 FPS"]
 FPS_CHILDREN = ["Mono", "Stereo", "Surround"]     # the instance names of the three values in the Sound Mode row this row is cloned from
 F = len(FRAMERATE)
 # The Image Quality page: render resolution (1x..8x), upscaling filter, sharpness (a slider, SHARP_STEP percent per press), FXAA.
@@ -61,7 +62,7 @@ RES_VALUES = ["1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x"]
 UP_VALUES = ["Bicubic", "Bilinear", "Pixel"]
 SHARP_STEP = 5
 # The rows with several values (cloned from the Sound Mode row): name -> (the texts of the values, the instance names of their clips)
-SELECTS = {"FpsLimit": (FPS_VALUES, ["V0", "V1", "V2"]),
+SELECTS = {"FpsLimit": (FPS_VALUES, ["V0", "V1"]),
            "Resolution": (RES_VALUES, ["V%d" % k for k in range(8)]),
            "Upscaling": (UP_VALUES, ["V0", "V1", "V2"])}
 # Every setting a page holds is one slot of the shared bank of HUD variables (PS2_Slot0..8, selected by PS2_PortPage; see
@@ -549,7 +550,7 @@ def build(d):
         t3, _ = make_text(m, 68, text, cmap, adv, ref=ref_music, mode="right")
         ch_irows.append(clone_clip(m, 208, 68, t3))
     # the Frame Rate entry of the list, its banner, Back, the VSync / Early FINISH rows (toggles) and the FPS limit row (a clone of the
-    # Sound Mode row: its label, and one clip per value with the texts 60 / 120 / 240 FPS in the style of Mono / Stereo / Surround)
+    # Sound Mode row: its label, and one clip per value with the texts 60 / 120 FPS in the style of Mono / Stereo / Surround)
     t3_pframe, _ = make_text(m, 62, "Frame Rate", cmap, adv, centered=True)
     ch_pframe = clone_clip(m, 196, 62, t3_pframe)
     t3_ftitle, _ = make_text(m, 75, "Frame Rate", cmap, adv, centered=True)

@@ -96,6 +96,18 @@ $common = ConvertTo-Pairs $Set '-Set'
 foreach ($name in $common.Keys) { $envSet[$name] = $common[$name] }
 $variantEnv = @{ A = (ConvertTo-Pairs $SetA '-SetA'); B = (ConvertTo-Pairs $SetB '-SetB') }
 
+# The project never runs above 120 FPS (AGENTS.md): no uncapped runs. They kept the GPU at 100 % until the AMD OpenGL driver
+# crashed, and they measure nothing a player sees.
+foreach ($pairs in @($envSet, $variantEnv['A'], $variantEnv['B'])) {
+    foreach ($name in @('PC_LOGIC_FPS', 'PC_WINDOW_FPS')) {
+        if (-not $pairs.Contains($name)) { continue }
+        $value = 0
+        if (-not [int]::TryParse([string]$pairs[$name], [ref]$value) -or $value -gt 120 -or ($name -eq 'PC_WINDOW_FPS' -and $value -le 0)) {
+            throw "$name=$($pairs[$name]) is above the 120 FPS cap (or unlimited): the project never runs above 120 FPS"
+        }
+    }
+}
+
 # Start-Process in Windows PowerShell 5.1 takes no environment block: the child inherits this process's, so it is set here
 # for the run and restored afterwards.
 function Invoke-Run([string]$label, [string]$exe, [int]$index) {

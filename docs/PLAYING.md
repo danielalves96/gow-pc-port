@@ -92,10 +92,9 @@ features of this port, with five items, and they work on the same switches:
   with the next frame. Without Bicubic, Sharpness does nothing. The graphics preset and the progressive scan (480p) switch of the
   launcher are not in the menu: changing the video mode while playing reloads the GS and corrupts the models' textures, so progressive
   scan stays a launcher setting that applies when the game starts.
-- **Frame Rate** opens a screen with the launcher's **Frame rate** settings: **FPS Limit** (60, 120 or 240; ← → or ✕ go through the three
-  values), **VSync** and **Early FINISH** (ON/OFF). They take effect on the spot: the game logic changes to the new rate, the window
-  switches VSync, and Early FINISH is switched once the GS worker has finished what it was drawing. 120 and 240 are experimental, as
-  in the launcher; with the game's 30 FPS mode (`PC_GAME_FPS=30`) the limit row does nothing, and without the GS worker Early FINISH
+- **Frame Rate** opens a screen with the launcher's **Frame rate** settings: **FPS Limit** (60 or 120; ← → or ✕ switch between the two), **VSync** and **Early FINISH** (ON/OFF). They take effect on the spot: the game logic changes to the new rate, the window
+  switches VSync, and Early FINISH is switched once the GS worker has finished what it was drawing. 120 is the highest, as in the
+  launcher; with the game's 30 FPS mode (`PC_GAME_FPS=30`) the limit row does nothing, and without the GS worker Early FINISH
   does nothing. The values are kept for the next session like the others.
 
 The Options menu itself is the original one. It works with the retail USA game only, and none of this appears while

@@ -76,8 +76,8 @@ The game log is plain text. Lines starting with `[gow-`, `[gs`, `[vu1` and `[iop
 | Speech or music slightly slower or faster for a moment | Expected: when the frame rate drops, the audio is stretched (pitch kept, at most 15 % slower) instead of cutting to silence, and it returns to normal speed once the buffer refills. `GOW_AUDIO_STRETCH=0` turns this off for comparison; `GOW_AUDIO_STATS=1` logs the buffer level and tempo |
 | Sound too quiet compared with 0.2.x | Since 0.3.0 the game's sound is 4 dB lower, so fights no longer sound blown out (the mix went over full scale and the limiter cut it in half). Raise the system volume, or set `GOW_AUDIO_GAIN_DB=0` for the old level |
 | No audio device | `GOW_AUDIO_DEVICE=default` picks the system default; set another device name if you have several |
-| Window stutters while the FPS number is fine | Disable VSync (not recommended for this game); with an experimental FPS limit (120 or 240), go back to 60 |
-| Something timed feels off at 120 or 240 FPS (a QTE, a combo, a jump) | The higher FPS limits are experimental: set **Performance → FPS limit** back to 60 and report the scene |
+| Window stutters while the FPS number is fine | Disable VSync (not recommended for this game); with the 120 FPS limit, go back to 60 |
+| Something timed feels off at 120 FPS (a QTE, a combo, a jump) | Actions timed in frames are not fully verified at 120: set **Performance → FPS limit** back to 60 and report the scene |
 
 ## Saves and the memory card
 

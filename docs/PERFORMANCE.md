@@ -6,10 +6,11 @@
 60 times per second. The port keeps the game at real-time speed: it never runs faster than on a PS2, and it never runs
 in slow motion either. A late frame is dropped, not stretched.
 
-The **FPS limit** in the launcher (60 / 120 / 240) is the game's real frame rate. 60 is the PS2's own. 120 and 240 are
-**experimental**: the game logic itself runs that many frames per second, each one a shorter step of time, so the game
-gets smoother without getting faster. A PC that cannot reach the limit simply shows fewer frames. The window always
-refreshes at the monitor's rate. Some actions timed in frames (quick-time events, combo windows) may feel different
+The **FPS limit** in the launcher (60 / 120) is the game's real frame rate. 60 is the PS2's own. At 120 the game logic
+itself runs 120 frames per second, each one a shorter step of time, so the game gets smoother without getting faster. A
+PC that cannot reach the limit simply shows fewer frames. The window refreshes at the monitor's rate, at most 120.
+Nothing runs above 120 FPS: the goal is a steady 60 on any PC, and higher rates only kept the GPU at 100 % (on one AMD
+card, until its OpenGL driver crashed). Some actions timed in frames (quick-time events, combo windows) may feel different
 above 60: go back to 60 if anything seems off. The counter shows that one real frame rate.
 
 ## What the frame rate depends on
@@ -48,8 +49,8 @@ Two conclusions that hold in every run so far:
 2. **Upscaling**: *Bilinear (soft)* is the cheapest; *Bicubic (sharp)* costs a shader pass; *Pixel* is the cheapest and
    sharpest-looking on a native-resolution window.
 3. **FXAA**: off if you are fighting for frames, on if edges bother you.
-4. **FPS limit**: 60 is the safe choice. 120 and 240 (experimental) make the CPU and the VU1 do that much more work per
-   second, so they need a fast CPU; heavy scenes fall back to what the PC can reach.
+4. **FPS limit**: 60 is the safe choice. 120 makes the CPU and the VU1 do twice the work per second, so it needs a fast
+   CPU; heavy scenes fall back to what the PC can reach.
 5. **Progressive scan (480p)**: on gives the sharper image; off is the interlaced mode with the anti-flicker filter,
    which is softer but slightly cheaper.
 6. **Optimize**: run `-Optimize` / `--optimize` (or let the launcher's background optimization run) after playing new

@@ -135,13 +135,13 @@ internal scale and stretched to the window, so the horizontal detail per degree 
 is advisable at 32:9); and with the menu background showing, `F = 1/A` crops the picture vertically, which at 32:9 keeps
 only about 37 % of the original height.
 
-**Frame-rate limits.** `PC_GAME_FPS=30` caps the game at 30. `PC_LOGIC_FPS=<120|144|165|240>` (experimental, unset by
-default) runs the game logic at that rate (`src/game/gow_logic_rate.cpp`: the frame end waits for 1/N s slots of guest
-time and the time step floor becomes 60/N fields, so the game keeps real-time speed); the launcher's FPS limit
-(60 / 120 / 240) sets it. With it, `GSHostPresentation::prepare` latches a new picture on each game buffer swap
+**Frame-rate limits.** `PC_GAME_FPS=30` caps the game at 30. `PC_LOGIC_FPS=120` (unset by default; the project never runs
+above 120, `kMaxFps` in `lib/gow_frame.h`, and a higher value gets 120) runs the game logic at that rate
+(`src/game/gow_logic_rate.cpp`: the frame end waits for 1/N s slots of guest time and the time step floor becomes 60/N
+fields, so the game keeps real-time speed); the launcher's FPS limit (60 / 120) sets it. With it, `GSHostPresentation::prepare` latches a new picture on each game buffer swap
 (`gowGameFlipCount`, counted by the display setup) and on the VBlank only after two VBlanks without a swap; at 60 it
-latches on each VBlank. `PC_WINDOW_FPS` (60 by default, 0 unlimited, clamped to 30–360) sets the host loop's
-`SetTargetFPS`; the launcher passes the display's refresh rate. `PC_VSYNC=1` requests the vsync hint instead.
+latches on each VBlank. `PC_WINDOW_FPS` (60 by default, clamped to 30–120; 0, which used to mean unlimited,
+gives 120) sets the host loop's `SetTargetFPS`; the launcher passes the display's refresh rate, at most 120. `PC_VSYNC=1` requests the vsync hint instead.
 
 ## 3. Texture replacement
 

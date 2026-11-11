@@ -169,7 +169,7 @@ namespace gow_game
             }
         }
 
-        // The largest value of a setting: toggles 1, sliders 100, the FPS limit 2, the render resolution 7, the filter 2.
+        // The largest value of a setting: toggles 1, sliders 100, the FPS limit 1 (60 / 120), the render resolution 7, the filter 2.
         uint32_t settingMax(int page, int i)
         {
             if (page == PageImage)
@@ -177,7 +177,7 @@ namespace gow_game
             if (page == PageQuality)
                 return i == 0 ? 7u : (i == 1 ? 2u : (i == 2 ? 100u : 1u));
             if (page == PageFrame)
-                return i == 0 ? 2u : 1u;
+                return 1u;
             return 1u;
         }
 
@@ -215,7 +215,7 @@ namespace gow_game
             if (page == PageImage || (page == PageQuality && i == 2))
                 std::fprintf(stderr, "[gow-menu] %s changed from the Port Options menu: %u%%\n", name, value);
             else if (page == PageFrame && i == 0)
-                std::fprintf(stderr, "[gow-menu] %s changed from the Port Options menu: %u FPS\n", name, value == 0u ? 60u : (value == 1u ? 120u : 240u));
+                std::fprintf(stderr, "[gow-menu] %s changed from the Port Options menu: %u FPS\n", name, value == 0u ? 60u : 120u);
             else if (page == PageQuality && i == 0)
                 std::fprintf(stderr, "[gow-menu] %s changed from the Port Options menu: %ux\n", name, value + 1u);
             else if (page == PageQuality && i == 1)

@@ -41,7 +41,7 @@
 is then compiled into a normal PC program. The PlayStation 2 hardware around it (graphics synthesizer, vector unit, I/O
 processor, sound, pad, memory card) is implemented natively. Nothing interprets the game's code at run time.
 
-On top of that you get the original 60 Hz game logic (or a 120 FPS limit, or an experimental 240, at the same speed), an
+On top of that you get the original 60 Hz game logic (or a 120 FPS limit, the highest, at the same speed), an
 OpenGL renderer with 1×–8× internal resolution, native movies
 with sound, a launcher with settings, keyboard and mouse support, a cheat menu, target lock, widescreen, custom texture
 packs and RetroAchievements.
@@ -178,8 +178,8 @@ Everything else (the full cheat list, target lock rules, agile combat, memory ca
 ## Performance
 
 The game runs at 60 FPS by default, the PS2's own rate, always at real-time speed: late frames are dropped, never slowed
-down. The launcher's 120 FPS limit and the **experimental** 240 run the game logic at that rate, smoother but never
-faster; the window refreshes at the monitor's rate.
+down. The launcher's 120 FPS limit runs the game logic at that rate, smoother but never faster; the window refreshes at
+the monitor's rate, at most 120. Nothing runs above 120 FPS: past it a weak PC gets no smoother, only hotter.
 
 - **Internal resolution 2× is the sweet spot.** 3× and above are heavy and, on mid-range cards, can stall the
   presentation.

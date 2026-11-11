@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub const SETTINGS_VERSION: u32 = 13;
+pub const SETTINGS_VERSION: u32 = 14;
 
 /// Highest internal GS scale the launcher offers (the runtime also keeps it within the GPU's texture limit).
 pub const MAX_SCALE: f64 = 8.0;
@@ -273,6 +273,12 @@ impl Settings {
             }
             self.settings_version = 13;
         }
+        if self.settings_version < 14 {
+            // The project never runs above 120 FPS (crate::launch::MAX_FPS): the experimental 240 is gone, and whoever had it
+            // gets 120.
+            self.fps_limit = crate::launch::fps_limit(self.fps_limit) as i32;
+            self.settings_version = 14;
+        }
         if self.language != "pt-BR" && self.language != "en" {
             self.language = if prefers_portuguese { "pt-BR".into() } else { "en".into() };
         }
@@ -397,6 +403,15 @@ mod tests {
         let mut chosen = Settings { settings_version: 12, fps_limit: 120, ..Settings::default() };
         chosen.migrate(false, &DisplayInfo::default());
         assert_eq!(chosen.fps_limit, 120);
+    }
+
+    #[test]
+    fn version_fourteen_caps_the_fps_limit_at_120() {
+        for (stored, expected) in [(60, 60), (120, 120), (240, 120)] {
+            let mut settings = Settings { settings_version: 13, fps_limit: stored, ..Settings::default() };
+            settings.migrate(false, &DisplayInfo::default());
+            assert_eq!(settings.fps_limit, expected, "stored {stored}");
+        }
     }
 
     #[test]

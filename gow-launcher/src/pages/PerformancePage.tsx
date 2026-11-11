@@ -76,7 +76,7 @@ export function PerformancePage() {
       <SettingRow icon={Gauge} title={t('fpsLimit')} description={t('fpsLimitDesc')}>
         <Select
           label={t('fpsLimit')}
-          options={[{ text: t('fps60'), value: 60 }, { text: t('fps120'), value: 120 }, { text: t('fps240'), value: 240 }]}
+          options={[{ text: t('fps60'), value: 60 }, { text: t('fps120'), value: 120 }]}
           value={settings.fpsLimit}
           onChange={(fpsLimit) => patch({ fpsLimit })}
         />

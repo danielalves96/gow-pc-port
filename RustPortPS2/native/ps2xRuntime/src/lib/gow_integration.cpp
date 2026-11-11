@@ -667,14 +667,16 @@ void gowWindowOpen(const char *title)
         SetExitKey(KEY_NULL);
 }
 
-// GOW-Port: window frames per second (Waffle: 60). PC_WINDOW_FPS=0 leaves it unlimited.
+// GOW-Port: window frames per second (Waffle: 60), at most kMaxFps: the project never runs above 120 (AGENTS.md). Unlimited (0)
+// and faster displays get 120: past the game's own rate the window only repeats pictures, and an uncapped window kept the GPU
+// at 100 % until the AMD OpenGL driver crashed (atio6axx.dll, every run of a 240 FPS A/B on 4 cores).
 int gowWindowFps()
 {
     const char *value = std::getenv("PC_WINDOW_FPS");
     if (!value || !*value)
         return 60;
     const long fps = std::strtol(value, nullptr, 10);
-    return fps == 0 ? 0 : static_cast<int>(std::clamp<long>(fps, 30, 360));
+    return fps <= 0 ? kMaxFps : static_cast<int>(std::clamp<long>(fps, 30, kMaxFps));
 }
 
 // GOW-Port: game logic rate (PC_LOGIC_FPS, experimental and off by default; src/game/gow_logic_rate.cpp). 60 unless
@@ -689,9 +691,15 @@ namespace
             const long requested = envLong("PC_LOGIC_FPS", 60, 0, 1000);
             if (requested == 60)
                 return 60;
-            if (requested != 120 && requested != 144 && requested != 165 && requested != 240)
+            // GOW-Port: 120 is the only rate above 60; a higher request (144, 165 and 240 used to exist) gets 120, the cap.
+            if (requested > kMaxFps)
             {
-                std::fprintf(stderr, "[gow-hfps] PC_LOGIC_FPS=%ld is not supported (120, 144, 165, 240): 60\n", requested);
+                std::fprintf(stderr, "[gow-hfps] PC_LOGIC_FPS=%ld is above the %d FPS cap: %d\n", requested, kMaxFps, kMaxFps);
+                return kMaxFps;
+            }
+            if (requested != kMaxFps)
+            {
+                std::fprintf(stderr, "[gow-hfps] PC_LOGIC_FPS=%ld is not supported (60 or %d): 60\n", requested, kMaxFps);
                 return 60;
             }
             if (envLong("PC_GAME_FPS", 60, 30, 60) <= 30)
@@ -770,7 +778,7 @@ bool gowFrameAvailable(int index)
 int gowFrameGet(int index)
 {
     if (index == 0)
-        return gowLogicFps() <= 90 ? 0 : (gowLogicFps() <= 180 ? 1 : 2);
+        return gowLogicFps() <= 90 ? 0 : 1;
     if (index == 1)
         return gowVsyncEnabled() ? 1 : 0;
     if (index == 2)
@@ -784,8 +792,8 @@ void gowFrameSet(int index, int value)
         return;
     if (index == 0)
     {
-        static const int rates[3] = {60, 120, 240};
-        const int next = rates[std::clamp(value, 0, 2)];
+        static const int rates[2] = {60, kMaxFps};
+        const int next = rates[std::clamp(value, 0, 1)];
         if (gowLogicFps() != next)
         {
             g_logicFps.store(next, std::memory_order_relaxed);
@@ -1217,8 +1225,8 @@ namespace
         static const char *const image[4] = {"brightness", "contrast", "gamma", "saturation"};
         for (int i = 0; i < 4; ++i)
             json += std::string(",\"") + image[i] + "\":" + std::to_string(gowImageGet(i));
-        static const int limits[3] = {60, 120, 240};
-        json += std::string(",\"fpsLimit\":") + std::to_string(limits[std::clamp(gowFrameGet(0), 0, 2)]);
+        static const int limits[2] = {60, kMaxFps};
+        json += std::string(",\"fpsLimit\":") + std::to_string(limits[std::clamp(gowFrameGet(0), 0, 1)]);
         json += std::string(",\"vsync\":") + (gowFrameGet(1) ? "true" : "false");
         if (gowFrameAvailable(2))
             json += std::string(",\"earlyFinish\":") + (gowFrameGet(2) ? "true" : "false");

@@ -42,7 +42,7 @@ Rust e depois compilado como um programa de PC comum. O hardware do PlayStation 
 unidade vetorial, processador de I/O, som, controle, cartão de memória - é implementado de forma nativa. Nada
 interpreta o código do jogo em tempo de execução.
 
-O resultado é o jogo na lógica original de 60 Hz (ou num limite de 120 FPS, ou no experimental de 240, na mesma velocidade), com
+O resultado é o jogo na lógica original de 60 Hz (ou num limite de 120 FPS, o máximo, na mesma velocidade), com
 renderizador OpenGL de 1× a 8× de resolução interna, vídeos
 nativos com som, um launcher com ajustes, teclado e mouse, menu de cheats, mira travada, widescreen, packs de texturas
 personalizadas e RetroAchievements.
@@ -183,8 +183,9 @@ O resto - lista completa de cheats, regras da mira travada, combate ágil, cart�
 ## Desempenho
 
 O jogo roda a 60 FPS por padrão, a taxa do próprio PS2, sempre na velocidade real: quadros atrasados são descartados,
-nunca desacelerados. O limite de 120 FPS do launcher e o de 240 (**experimental**) rodam a lógica do jogo nessa taxa, mais
-fluido mas nunca mais rápido; a janela atualiza na taxa do monitor.
+nunca desacelerados. O limite de 120 FPS do launcher roda a lógica do jogo nessa taxa, mais fluido mas nunca mais rápido;
+a janela atualiza na taxa do monitor, no máximo 120. Nada roda acima de 120 FPS: além disso um PC fraco não fica mais
+fluido, só mais quente.
 
 - **Resolução interna 2× é o ponto ideal.** 3× ou mais é pesado e, em placas intermediárias, pode travar a apresentação.
 - O lado da CPU é dominado pela **VU1** (unidade vetorial). Cada passe de otimização converte mais dela em código nativo:

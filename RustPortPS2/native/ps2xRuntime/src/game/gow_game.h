@@ -10,7 +10,7 @@
 #include <cstddef>
 #include <string>
 
-int gowLogicFps(); // lib/gow_integration.cpp: PC_LOGIC_FPS (60 unless 120, 144, 165 or 240 and no 30 FPS cap)
+int gowLogicFps(); // lib/gow_integration.cpp: PC_LOGIC_FPS (60 or 120, never above kMaxFps; 60 with the 30 FPS cap)
 void gowNoteGameFlip(); // lib/gow_integration.cpp: the game swapped its display buffer
 void gowSetHangReportExtra(void (*report)(PS2Runtime &)); // lib/gow_integration.cpp: more [gow-hang] lines (diagnostics)
 void gowSetVBlankExtra(void (*callback)(uint8_t *rdram)); // lib/gow_integration.cpp: one more EE-thread callback per VBlank

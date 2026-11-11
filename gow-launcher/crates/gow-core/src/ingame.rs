@@ -146,7 +146,7 @@ mod tests {
         assert!(settings.vsync);
         assert!(!settings.early_finish);
         assert!(apply(&mut settings, r#"{"fpsLimit":200}"#));
-        assert_eq!(settings.fps_limit, 240, "snapped to a limit the launcher offers");
+        assert_eq!(settings.fps_limit, 120, "snapped to a limit the launcher offers, never above the cap");
         assert!(apply(&mut settings, r#"{"fpsLimit":-3}"#));
         assert_eq!(settings.fps_limit, 60);
         // without the worker the game sends no earlyFinish: the setting stays
