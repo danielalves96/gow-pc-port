@@ -214,6 +214,7 @@ struct VU1NativeAccess
     template <typename F>
     static void walkHistory(VU1Interpreter::NativeState &ns, uint64_t now, uint64_t want[3], F &&ready);
     static void syncInflight(VU1Interpreter &vu);
+    template <bool Idle>
     static void finishBlockTiming(VU1Interpreter &vu, const VU1Interpreter::NativeState::Slot &sl, const uint8_t *cyc, uint32_t cycId,
                                   uint64_t start);
     static void callLower(VU1NativeCtx &n, uint32_t pc, uint32_t lower, uint32_t upper);

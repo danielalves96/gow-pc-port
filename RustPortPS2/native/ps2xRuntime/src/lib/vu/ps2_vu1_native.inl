@@ -614,13 +614,14 @@ void VU1NativeAccess::scalarStart(VU1Interpreter &vu, uint64_t issue, uint32_t l
 
 // After a native block: it joins the history (its results that outlive it are found there when needed); FDIV/EFU stay
 // busy until their ready cycle.
+template <bool Idle> // Idle: cyc is the slot's idle table (cycId 0), known by the caller
 VU1N_INLINE void VU1NativeAccess::finishBlockTiming(VU1Interpreter &vu, const VU1Interpreter::NativeState::Slot &sl, const uint8_t *cyc,
                                                      uint32_t cycId, uint64_t start)
 {
     using NS = VU1Interpreter::NativeState;
     NS &ns = *vu.m_native;
     // the idle table's length is in the slot: most blocks never touch their table's cache line here
-    const uint64_t end = start + (cyc == sl.idle ? sl.idleEnd : cyc[sl.pairs - 1u] + 1u);
+    const uint64_t end = start + (Idle || cyc == sl.idle ? sl.idleEnd : cyc[sl.pairs - 1u] + 1u);
     NS::Hist &h = ns.hist[ns.histNext];
     h.bt = sl.bt;
     h.cyc = cyc;
@@ -859,64 +860,80 @@ bool VU1Interpreter::runNative(StepContext &context)
             ++ns.count;
             ns.trace.push_back(pc);
         }
-        const uint64_t start = m_cycle;
         // Values never depend on timing, only flag reads do. A block that reads flags written before it gets its exact
         // issue cycles from the pipeline state at entry (the stalls decide which of those flags it sees); the others use
         // their idle-pipeline table and only hand their results and flags in flight on.
         uint32_t cycId = 0u;
         const uint8_t *cyc = sl.readsEntryFlags ? VU1NativeAccess::blockTiming(*this, sl, cycId) : sl.idle;
         ctx.cyc = cyc;
-        ctx.start = start;
         ctx.pc = pc; // GOW-Port: position independent blocks add their offsets to it
-        if (sl.tail)
+        // GOW-Port: a block that jumps back to its own start (the vertex loops are most of the VU1 time) and does not read
+        // entry flags runs again with the same slot, the same idle timing table (cycId 0) and no verify bookkeeping, so
+        // the next iteration skips the slot lookup, the miss / armed / limit tests and the timing-table choice. Everything
+        // else per block (start cycle, history entry, tail record, scalar timing, retire, stop / budget test) is the same
+        // as at the top of the loop, and the iteration only repeats when the top of the loop would take the same path.
+        const bool repeat = !sl.readsEntryFlags && ns.limit == ~0u;
+        uint64_t iterations = 0u;
+        uint32_t result;
+        do
         {
-            VU1FlagTail &t = ns.hist[ns.histNext].tail;
-            t.desc = sl.tail;
-            t.cyc = cyc;
-            t.start = start;
-            ctx.tail = &t;
-        }
-        const uint32_t result = fn(ctx);
-        VU1NativeAccess::finishBlockTiming(*this, sl, cyc, cycId, start);
-        if (m_cycle >= m_nextCommitCycle)
-        {
-            // FDIV/EFU entries kept for timing retire when ready (values are written already). GOW-Port: inside the native
-            // loop nothing else is pending (callouts commit their values, their flags join the rings), so the FDIV/EFU
-            // part of commitReadyPipelines runs here inline: same results, without the call and its empty queue walks.
-            if (((m_storePending | m_vfPending | m_viPending | m_accPending) | m_flagCount) != 0u)
-                commitReadyPipelines();
-            else
+            const uint64_t start = m_cycle;
+            ctx.start = start;
+            if (sl.tail)
             {
-                uint64_t next = ~0ull;
-                if (m_fdiv.valid)
+                VU1FlagTail &t = ns.hist[ns.histNext].tail;
+                t.desc = sl.tail;
+                t.cyc = cyc;
+                t.start = start;
+                ctx.tail = &t;
+            }
+            result = fn(ctx);
+            if (repeat)
+                VU1NativeAccess::finishBlockTiming<true>(*this, sl, cyc, cycId, start);
+            else
+                VU1NativeAccess::finishBlockTiming<false>(*this, sl, cyc, cycId, start);
+            if (m_cycle >= m_nextCommitCycle)
+            {
+                // FDIV/EFU entries kept for timing retire when ready (values are written already). GOW-Port: inside the native
+                // loop nothing else is pending (callouts commit their values, their flags join the rings), so the FDIV/EFU
+                // part of commitReadyPipelines runs here inline: same results, without the call and its empty queue walks.
+                if (((m_storePending | m_vfPending | m_viPending | m_accPending) | m_flagCount) != 0u)
+                    commitReadyPipelines();
+                else
                 {
-                    if (m_fdiv.readyCycle <= m_cycle)
+                    uint64_t next = ~0ull;
+                    if (m_fdiv.valid)
                     {
-                        m_state.q = m_fdiv.value;
-                        const uint32_t currentDi = m_fdiv.statusDi & 0x30u;
-                        m_state.status = (m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
-                        m_fdiv.valid = false;
-                    }
-                    else
-                        next = m_fdiv.readyCycle;
-                }
-                for (ScalarPipelineEntry &e : m_efu)
-                    if (e.valid)
-                    {
-                        if (e.readyCycle <= m_cycle)
+                        if (m_fdiv.readyCycle <= m_cycle)
                         {
-                            m_state.p = e.value;
-                            e.valid = false;
+                            m_state.q = m_fdiv.value;
+                            const uint32_t currentDi = m_fdiv.statusDi & 0x30u;
+                            m_state.status = (m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
+                            m_fdiv.valid = false;
                         }
                         else
-                            next = std::min(next, e.readyCycle);
+                            next = m_fdiv.readyCycle;
                     }
-                m_nextCommitCycle = next;
+                    for (ScalarPipelineEntry &e : m_efu)
+                        if (e.valid)
+                        {
+                            if (e.readyCycle <= m_cycle)
+                            {
+                                m_state.p = e.value;
+                                e.valid = false;
+                            }
+                            else
+                                next = std::min(next, e.readyCycle);
+                        }
+                    m_nextCommitCycle = next;
+                }
             }
-        }
-        ns.nativePairs += sl.pairs;
-        ++ns.nativeBlocks;
-        m_state.pc = result & 0x3FFFu;
+            ++iterations;
+            m_state.pc = result & 0x3FFFu;
+        } while (repeat && (result & (kVu1nEnded | kVu1nBail)) == 0u && (result & 0x3FFFu) == pc && !m_stopRequested &&
+                 m_cycle < context.budgetEnd);
+        ns.nativePairs += iterations * sl.pairs;
+        ns.nativeBlocks += iterations;
         if (result & kVu1nEnded)
         {
             context.programEnded = true;
