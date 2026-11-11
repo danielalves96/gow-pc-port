@@ -31,6 +31,7 @@
 #   1. Extracts the disc from the ISO into game/ (with its sector map, .disc_layout) and prepares game/IOP_MOD.
 #   2. Builds the Rust tools (ps2_recomp, ps2-tools) and translates SCUS_973.99 to C++ with RustPortPS2/games/scus-97399/gow-port.toml.
 #   3. Builds the game (gow-2005). The launcher is a separate download (GitHub Releases).
+#      The native IOP modules are created before building from the disc's IRX files (games/scus-97399/iop.manifest).
 #   4. Optimization: the VU1 microcode is created before building from the ELF (games/scus-97399/vu1.manifest, without
 #      playing). If that was not possible, it runs the game for a few minutes with automatic key presses, saves the VU1 microcode and
 #      the IOP modules it uses and rebuilds with them as native code (much faster). Only the first time;
@@ -505,6 +506,19 @@ for f in "$GEN"/out/*.h; do copy_if_changed "$f" "$NATIVE/ps2xRuntime/include/$(
 # The overrides live in ps2xRuntime/src/game now (part of the CMake target); drop the copies older versions left here.
 rm -f "$RUNNER/gow_overrides.cpp" "$RUNNER/gow_pad2_packet.h" "$RUNNER/gow_gs_replay.h"
 echo "$(ls "$GEN"/out/*.cpp | wc -l) C++ files in RustPortPS2/native/ps2xRuntime/src/runner."
+
+# GOW-Port: the native IOP code needs no game session either. The text of an IRX at its load base is a function of the IRX file
+# alone, so the manifest (games/scus-97399/iop.manifest: file, base, size and hash per module, no code) rebuilds the dump the game
+# writes with PS2X_IOP_DUMP_MODULES from the disc's own IRX files, and iop-gen compiles it before the build.
+IOP_MANIFEST="$PROFILE/iop.manifest"
+if [ -f "$IOP_MANIFEST" ]; then
+    step "IOP modules from the disc (without playing)"
+    if "$TOOLS" iop-manifest apply "$GAME" "$IOP_MANIFEST" "$GEN/iop_disc"; then
+        "$TOOLS" iop-gen "$GEN/iop_disc" "$NATIVE/ps2xIOP/src/native"
+    else
+        warn "Could not rebuild the IOP modules from this disc; the IOP code will be captured by the optimization run, or interpreted."
+    fi
+fi
 
 # --- 3. Game ------------------------------------------------------------------------------------------
 build_game() {

@@ -223,7 +223,7 @@ automatically**).
 | Folder / file | Contents |
 |---|---|
 | `game/` | The extracted disc: `SCUS_973.99`, the data files, `.disc_layout` (sector map), `IOP_MOD/` and, after your first save, `Mcd001.ps2` |
-| `build-gen/` | Work folder of the recompiler: the filled-in `recomp.toml`, `recomp.log`, the generated C++ in `out/`, `optimize.log` and the captured IOP modules |
+| `build-gen/` | Work folder of the recompiler: the filled-in `recomp.toml`, `recomp.log`, the generated C++ in `out/`, `iop_disc/` (the IOP modules rebuilt from the disc), `optimize.log` and the captured IOP modules |
 | `build/` | The CMake/Ninja tree and the game: `build/ps2xRuntime/gow-2005` (`gow-2005.exe` on Windows) |
 | `vu1_captures/` | VU1 micro-memory images (16 KB each) that let the vector unit run native code |
 | `build-rust/` | `ps2_recomp` and `ps2-tools` when they were built from source |
@@ -241,7 +241,10 @@ already does the important half automatically:
 
 - **VU1, always**: the microcode is extracted from the ELF itself using the committed manifest
   (`RustPortPS2/games/scus-97399/vu1.manifest`), before the first build. No game session is needed.
-- **IOP and extra VU1, optionally**: `-Optimize` / `--optimize` starts the game with automatic button presses for 240
+- **IOP, always**: the game's IRX modules are relocated from the disc's own files as the game's loader does, using the
+  committed manifest (`RustPortPS2/games/scus-97399/iop.manifest`: file names, load addresses, sizes and hashes, no code),
+  and compiled to native code before the first build. No game session is needed.
+- **Extra VU1, optionally**: `-Optimize` / `--optimize` starts the game with automatic button presses for 240
   seconds, records the code it executes, and rebuilds with it. Run it again after playing new areas to convert more of
   the game to native code; the port gets faster each time.
 

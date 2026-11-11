@@ -75,6 +75,11 @@ RustPortPS2/target/release/ps2-tools vu1-manifest apply game/SCUS_973.99 \
   RustPortPS2/games/scus-97399/vu1.manifest vu1_captures
 cp RustPortPS2/games/scus-97399/vu1-heads.list "$(dirname vu1_captures)/vu1n_heads.txt"
 
+# 1b. Native IOP modules from the disc's IRX files (iop.manifest: file, load base, text size and hash; no code).
+#     This writes what PS2X_IOP_DUMP_MODULES would, and iop-gen turns it into ps2xIOP/src/native/iopn_*.cpp.
+RustPortPS2/target/release/ps2-tools iop-manifest apply game RustPortPS2/games/scus-97399/iop.manifest build-gen/iop_disc
+RustPortPS2/target/release/ps2-tools iop-gen build-gen/iop_disc RustPortPS2/native/ps2xIOP/src/native
+
 # 2. Recompile the game
 cargo build --release -p ps2-recomp-cli --manifest-path RustPortPS2/Cargo.toml
 mkdir -p build-gen/out

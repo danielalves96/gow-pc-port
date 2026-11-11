@@ -22,6 +22,8 @@
 #   2. Builds the Rust tools (ps2_recomp, ps2-tools) and translates SCUS_973.99 to C++ with RustPortPS2\games\scus-97399\gow-port.toml.
 #   3. Builds the game (gow-2005.exe, MSVC + Ninja). The launcher is a separate download (GitHub Releases): its
 #      setup wizard runs this script and finds the result.
+#      Before the build the VU1 microcode and the native IOP modules are created from the ELF and the disc's IRX files
+#      (vu1.manifest, iop.manifest in games\scus-97399), without playing.
 #   4. Optimization: runs the game for a few minutes with automatic key presses, saves the VU1 microcode and the IOP
 #      modules it uses and rebuilds with them as native code. Only the first time; -Optimize repeats it,
 #      -NoOptimize skips it.
@@ -834,6 +836,21 @@ Get-ChildItem -Path $out -Filter *.h -File | ForEach-Object { CopyIfChanged $_.F
 # The overrides live in ps2xRuntime/src/game now (part of the CMake target); drop the copies older versions left here.
 foreach ($f in @('gow_overrides.cpp', 'gow_pad2_packet.h', 'gow_gs_replay.h')) {
     Remove-Item -LiteralPath (Join-Path $runner $f) -Force -ErrorAction SilentlyContinue
+}
+
+# GOW-Port: the native IOP code needs no game session either. The text of an IRX at its load base is a function of the IRX
+# file alone, so the manifest (games/scus-97399/iop.manifest: file, base, size and hash per module, no code) rebuilds the dump
+# the game writes with PS2X_IOP_DUMP_MODULES from the disc's own IRX files, and iop-gen compiles it before the build. Without
+# this, an installation that skipped the optimization run interpreted every IRX instruction.
+$iopManifest = Join-Path $Profile 'iop.manifest'
+if (Test-Path -LiteralPath $iopManifest) {
+    Step 'IOP modules from the disc (without playing)'
+    $iopDisc = Join-Path $Gen 'iop_disc'
+    & $toolsExe iop-manifest apply $Game $iopManifest $iopDisc
+    if ($LASTEXITCODE -eq 0) {
+        Run $toolsExe @('iop-gen', $iopDisc, (Join-Path $Native 'ps2xIOP\src\native'))
+    }
+    else { Warn 'Could not rebuild the IOP modules from this disc; the IOP code will be captured by the optimization run, or interpreted.' }
 }
 
 # --- 3. Game ------------------------------------------------------------------------------------------
