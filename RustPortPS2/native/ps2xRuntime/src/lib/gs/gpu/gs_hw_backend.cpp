@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 #include <deque>
 #include <functional>
 #include <filesystem>
@@ -1895,8 +1896,13 @@ struct GSHwBackend::Impl
         // GOW-Port: field by field (gs_types.h operator==). memcmp also compared the padding bytes between the fields, which
         // the language leaves unspecified: MSVC happened to keep them equal most of the time, clang does not, and then no two
         // states compared equal (every primitive its own batch: ~2 fps in 3D; gow-native-pc runtime patch 12).
-        return a == b;
+        // GOW-Port: states reach here byte for byte as the frontend built them (zero padding, kept through the queue and copied
+        // with memcpy by copyState), so equal bytes are the common case and prove equal fields; only a mismatch (a real change,
+        // or padding that differs) pays for the field-by-field comparison.
+        return std::memcmp(&a, &b, sizeof(GSDrawState)) == 0 || a == b;
     }
+    static_assert(std::is_trivially_copyable_v<GSDrawState>, "copyState copies the bytes");
+    static void copyState(GSDrawState &dst, const GSDrawState &src) { std::memcpy(&dst, &src, sizeof(GSDrawState)); }
 
     // GOW-Port: per-draw constants of addVertex (they used to be recomputed for each of the vertices of the draw)
     float vtxHalf = 0.0f, vtxOfx = 0.0f, vtxOfy = 0.0f;
@@ -2105,7 +2111,7 @@ struct GSHwBackend::Impl
         if (!haveShuffle)
         {
             haveShuffle = true;
-            shuffleState = s;
+            copyState(shuffleState, s);
             shuffleDst = dst;
             shuffleSrc = src;
             shuffleSrcZ = srcDepth;
@@ -2229,7 +2235,7 @@ struct GSHwBackend::Impl
             flushPending();
         if (!havePending)
         {
-            pendingState = s;
+            copyState(pendingState, s);
             havePending = true;
         }
         const float zmax = zMaxFor(s.context.zbuf.psm);
@@ -2302,8 +2308,6 @@ struct GSHwBackend::Impl
                 const float q0 = std::fabs(a.q) < 1e-20f ? 1e-20f : a.q, q1 = std::fabs(c.q) < 1e-20f ? 1e-20f : c.q;
                 u0 = a.s / q0 * texW; v0 = a.t / q0 * texH; u1 = c.s / q1 * texW; v1 = c.t / q1 * texH;
             }
-            GSDrawState sp = s; // sprites carry texel UVs, never STQ
-            (void)sp;
             GSVertex corner[4] = {a, a, a, a};
             float xs[2] = {a.x, c.x}, ys[2] = {a.y, c.y};
             float us[2] = {u0, u1}, vs[2] = {v0, v1};
