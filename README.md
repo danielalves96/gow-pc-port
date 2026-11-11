@@ -51,7 +51,7 @@ packs and RetroAchievements.
 | | An emulator (e.g. PCSX2) | This port |
 |---|---|---|
 | How the game runs | Executes the original MIPS binary instruction by instruction | **Translates it to C++ once**, then compiles that into `gow-2005` |
-| PS2 hardware | Emulated: CPU, GS, VU, IOP, DMA, timers… | **Native services**: OpenGL GS, VU1 microcode compiled ahead of time, the game's IRX modules compiled to C++ by the optimization pass |
+| PS2 hardware | Emulated: CPU, GS, VU, IOP, DMA, timers… | **Native services**: OpenGL GS, VU1 microcode compiled ahead of time, the game's IRX modules compiled to C++ at installation, from the disc (no game run) |
 | BIOS | Requires a PS2 BIOS dump | **None.** Kernel and library services are implemented in the runtime |
 | Your disc | Mounted or emulated on every run | Read once at install time; afterwards the extracted files are read by native disc code |
 | What you run | A console application inside a virtual machine | An ordinary native executable, `gow-2005` |
