@@ -118,6 +118,53 @@ To do, in order, each step measured before the next:
 Deliverable: per step, the replay bench result (records checked, M = 0, median before and after) and the toaster A/B;
 commits per step with those numbers in the message.
 
+### Item 7 results (2026-11-11)
+
+**Profile** (combat, 4 cores, final build, `GOW_SAMPLING` at 1 kHz for 120 s, symbols from `llvm-nm`): every VU1 block runs
+native (0 misses, `GOW_VU1N_DIAG`), ~80 k programs and ~16 M blocks per second, ~8 pairs per block, ~3 ns per VU pair. Share of
+the VU1 thread's wall time: native blocks 26 %, the `runNative` dispatch loop 13 %, `blockTiming` 3 % (its slow path),
+`commitReadyPipelines` 2.6 %, VIF unpack 3 %, slot setup and code-change bookkeeping 1.6 %. The hot blocks are four
+software-pipelined vertex kernels in the per-draw part of the micro memory (0x2800-0x3E00): lit and textured (4x4 transform,
+one FDIV, ST*Q, 3x3 lighting), the same with a second matrix for a second ST, plain textured (two blocks that alternate), and
+position only. Together ~13 % of the thread; the dispatch around them costs more than they do.
+
+**Steps** (all runtime, `ps2_vu1_native.inl`; the VU1 replay bench on 4000 combat records, 8 reps, 3 alternating runs):
+
+| Commit | Change | Replay bench |
+|---|---|---|
+| `719372f` | FDIV/EFU retire inline in the native loop; a micro-memory change tests only the slots near the changed pairs | 0 differ; median -2.7 % |
+| `b5eb437`, `0258970` | a block that loops to itself, or whose next block is already set up, is entered again without the full dispatch (same per-block timing, history, flags and budget cut) | 0 differ, and the per-record hashes **with the final cycle count** (`ca74f55`) identical to the base: cycle-exact |
+| all, no PGO | | median 13.26 -> 12.71 ms (-4.1 %) |
+| all + the shipped runtime profile | | median 13.26 -> 12.15 ms (-8.4 %) |
+
+**Game, final build of this branch against `d01ed93`** (shipped runtime profile, plus the GS stage, GL backend and EE thread
+changes of the same branch), launcher environment, 60 FPS, opening scene, 3 alternating pairs of 150 s:
+
+| Cores | Base | This branch |
+|---|---|---|
+| 2 | 41.1 FPS, worst 5 s window 20.4, p95 73.9 ms, 444 frames over 50 ms | 44.0 FPS, worst window 25.2, p95 63.5 ms, 293 frames over 50 ms |
+| 4 | 60.0 FPS; VU1 7.94, EE 4.55, GS 6.83 ms/frame (19.3 in all) | 60.0 FPS; VU1 5.89 (-26 %), EE 4.16 (-9 %), GS 3.66 (-46 %) ms/frame (13.7 in all, -29 %); every run of this branch below every base run on VU1 and GS |
+
+The first 4-core run of this branch had one 5 s window at 3.9 FPS with every thread slowed at once: the new GS queue producer
+lock polled with `sleep_for(50 us)` when contended (at least ~1 ms on Windows). Fixed in `ad827be` (futex-style wait); the
+confirmation run above has no window below 59.9 FPS and no hitch over 100 ms after start-up. With 2 cores the game is still
+CPU-bound below 60 FPS: the next steps are the ones in the design note below plus fewer heavy threads competing.
+
+**Design note: what is left for the VU1** (it stays above ~4 ms per frame on 4 cores):
+
+- *Kernel specialization* (step 3 proper): hand-written or generated SIMD versions of the four vertex kernels that process 4
+  (SSE) or 8 (AVX2, optional) vertices per instruction, with the same lane-wise operations under round-toward-zero and
+  flush-to-zero so the bits stay identical, and the loop entry/exit state (flag tails, `m_cycle`, the software-pipelined
+  prologue/epilogue) kept exact. Estimate: infrastructure (override hook per micro-memory pattern, cycle and tail accounting,
+  a differential harness on the replay bench) 5-7 days, then 2-5 days per kernel; 4-5 weeks for the four. Ceiling: ~0.8 ms per
+  frame (~10 % of the VU1 thread), because the four kernels are ~13 % of it.
+- *Loop folding in the generator*: let the self-looping kernel blocks iterate inside the generated function with
+  per-iteration idle-cycle accounting, removing the remaining per-iteration dispatch; 2-4 days, exact by construction, best
+  next step.
+- *GHClassic's direct path* (draw without executing the VU1): months, and it loses the replay bench (GIF output) as the
+  exactness oracle. Not recommended.
+- The rest of the thread is VIF unpack (3 %) and the GS stage push (1.9 %): cheaper to attack than the kernels.
+
 ## Rules for this work
 
 - Exactness first: the replay bench with M = 0 for every VU1 change, the parity gate untouched (`cargo test --workspace`
