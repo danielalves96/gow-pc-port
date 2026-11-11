@@ -338,18 +338,23 @@ fn vcallms(inst: &Instruction) -> String {
     )
 }
 
-/// `VCALLMSR` calls a VU0 microprogram at the address held in an integer register.
-fn vcallmsr(inst: &Instruction) -> String {
+/// `VCALLMSR` calls a VU0 microprogram at the address held in CMSAR0.
+///
+/// GOW-Port: `[codegen] vu0_macro_fixes`. PS2Recomp's text reads `ctx->vi[rd]`, and `rd` is 27 here (the CMSAR0 control
+/// register): past the 16-entry `vi` array, so the program started at whatever followed it (gta-vcs-recomp,
+/// docs/PS2RECOMP_PATCHES.md). Without the switch the text stays PS2Recomp's, for byte parity.
+fn vcallmsr(inst: &Instruction, fixed: bool) -> String {
+    let start = if fixed { "ctx->vu0_cmsar0".to_owned() } else { format!("ctx->vi[{}]", inst.rd) };
     format!(
         concat!(
             "{{ ",
-            "    uint16_t instr_index = ctx->vi[{reg}] & 0x1FF; ",
+            "    uint16_t instr_index = {start} & 0x1FF; ",
             "    uint32_t target_byte_addr = (uint32_t)instr_index << 3; ",
             "    ctx->vu0_pc = target_byte_addr; ",
             "    runtime->vu0StartMicroProgram(rdram, ctx, target_byte_addr); ",
             "}}"
         ),
-        reg = inst.rd
+        start = start
     )
 }
 
@@ -563,23 +568,32 @@ fn vmr32(inst: &Instruction) -> String {
     )
 }
 
-fn vclipw(inst: &Instruction) -> String {
+/// GOW-Port: with `[codegen] vu0_macro_fixes`, CLIP sets bit 0 when x > +|w| and bit 1 when x < -|w|, then y (bits 2-3)
+/// and z (bits 4-5), as the VU1 interpreter does. PS2Recomp's text (kept without the switch, for byte parity) swaps the +
+/// and - bits and compares with w instead of |w| (gta-vcs-recomp, docs/PS2RECOMP_PATCHES.md).
+fn vclipw(inst: &Instruction, fixed: bool) -> String {
     let field = inst.function & 0x3;
     let shuffle_pattern = format!("_MM_SHUFFLE({field},{field},{field},{field})");
+    let abs = if fixed { "ft = _mm_and_ps(ft, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))); " } else { "" };
+    let (plus, minus) = if fixed { ("gt", "lt") } else { ("lt", "gt") };
     format!(
         concat!(
             "{{ __m128 fs = ctx->vu0_vf[{rd}]; ",
             "__m128 ft = _mm_shuffle_ps(ctx->vu0_vf[{rt}], ctx->vu0_vf[{rt}], {shuffle}); ",
+            "{abs}",
             "__m128 neg_ft = _mm_xor_ps(ft, _mm_castsi128_ps(_mm_set1_epi32(0x80000000))); ",
             "__m128 gt = _mm_cmpgt_ps(fs, ft); ",
             "__m128 lt = _mm_cmplt_ps(fs, neg_ft); ",
             "uint32_t gt_mask = (uint32_t)_mm_movemask_ps(gt); ",
             "uint32_t lt_mask = (uint32_t)_mm_movemask_ps(lt); ",
-            "uint32_t flags = ((lt_mask & 0x1) << 0) | ((gt_mask & 0x1) << 1) | ",
-            "((lt_mask & 0x2) << 1) | ((gt_mask & 0x2) << 2) | ",
-            "((lt_mask & 0x4) << 2) | ((gt_mask & 0x4) << 3); ",
+            "uint32_t flags = (({p}_mask & 0x1) << 0) | (({m}_mask & 0x1) << 1) | ",
+            "(({p}_mask & 0x2) << 1) | (({m}_mask & 0x2) << 2) | ",
+            "(({p}_mask & 0x4) << 2) | (({m}_mask & 0x4) << 3); ",
             "ctx->vu0_clip_flags = ((ctx->vu0_clip_flags << 6) | (flags & 0x3F)) & 0xFFFFFF; }}"
         ),
+        abs = abs,
+        p = plus,
+        m = minus,
         rd = inst.rd,
         rt = inst.rt,
         shuffle = shuffle_pattern
@@ -638,7 +652,7 @@ pub fn translate_macro(hooks: &mut impl FamilyTranslator, inst: &Instruction) ->
             VU0_S2_VABS => vabs(inst),
             VU0_S2_VMOVE => vmove(inst),
             VU0_S2_VMR32 => vmr32(inst),
-            VU0_S2_VCLIPw => vclipw(inst),
+            VU0_S2_VCLIPw => vclipw(inst, hooks.codegen().vu0_macro_fixes),
             VU0_S2_VNOP => "// NOP operation, no action needed for VU0".to_owned(),
             VU0_S2_VRNEXT => vrnext(inst),
             VU0_S2_VRGET => vrget(inst),
@@ -661,7 +675,7 @@ pub fn translate_macro(hooks: &mut impl FamilyTranslator, inst: &Instruction) ->
         VU0_S1_VIAND => integer_op(inst, false, '&'),
         VU0_S1_VIOR => integer_op(inst, false, '|'),
         VU0_S1_VCALLMS => vcallms(inst),
-        VU0_S1_VCALLMSR => vcallmsr(inst),
+        VU0_S1_VCALLMSR => vcallmsr(inst, hooks.codegen().vu0_macro_fixes),
         VU0_S1_VADDq => scalar_op(inst, "PS2_VADD", "q"),
         VU0_S1_VSUBq => scalar_op(inst, "PS2_VSUB", "q"),
         VU0_S1_VMULq => scalar_op(inst, "PS2_VMUL", "q"),
@@ -705,4 +719,26 @@ fn min_max_field(inst: &Instruction, op: &str) -> String {
         mask = mask,
         vfd = vfd
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vcallmsr_starts_at_cmsar0_only_with_the_fix() {
+        let inst = Instruction { rd: 27, ..Instruction::default() };
+        assert!(vcallmsr(&inst, true).contains("ctx->vu0_cmsar0 & 0x1FF"));
+        assert!(vcallmsr(&inst, false).contains("ctx->vi[27] & 0x1FF"), "PS2Recomp's text without the switch");
+    }
+
+    #[test]
+    fn vclipw_puts_the_plus_side_in_bit_0_with_the_fix() {
+        let inst = Instruction { function: 0x1FF, ..Instruction::default() };
+        let fixed = vclipw(&inst, true);
+        assert!(fixed.contains("_mm_set1_epi32(0x7FFFFFFF)"), "compares with |w|: {fixed}");
+        assert!(fixed.contains("((gt_mask & 0x1) << 0) | ((lt_mask & 0x1) << 1)"), "{fixed}");
+        let compat = vclipw(&inst, false);
+        assert!(!compat.contains("0x7FFFFFFF") && compat.contains("((lt_mask & 0x1) << 0)"), "{compat}");
+    }
 }

@@ -1711,3 +1711,5 @@ mode = "gow"
 # read it (emit/lean.rs; device accesses pass their pc to the slow path). With the one-compare guest memory access and the
 # inline call dispatch of the runtime (GOW_FAST_DISPATCH=0 turns that off): EE -18 % at 60 FPS, 97.6 -> 106.7 FPS at the
 # 240 FPS limit on 4 cores (3 alternating pairs of 150 s, scripts/ab-perf.ps1).
+# vu0_macro_fixes (on in "gow"): VCALLMSR starts at CMSAR0 and VCLIPw sets its flags like the VU1 interpreter (both wrong
+# in PS2Recomp, found by gta-vcs-recomp). God of War's EE code has neither instruction today, so its output is unchanged.

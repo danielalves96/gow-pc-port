@@ -341,7 +341,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 
 void GS::reset()
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     std::memset(m_ctx, 0, sizeof(m_ctx));
     m_gifInput = {}; // GOW-Port: reset also discards incomplete tags/registers.
     m_prim = {};
@@ -450,7 +450,7 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
 
 GSDebugSnapshot GS::getDebugSnapshot() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
 
     GSDebugSnapshot snapshot{};
     snapshot.ctx[0] = m_ctx[0];
@@ -490,7 +490,7 @@ GSDebugSnapshot GS::getDebugSnapshot() const
 
 std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
 
     std::vector<GSDebugHistoryEntry> out;
     out.reserve(m_debugHistoryCount);
@@ -504,7 +504,7 @@ std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 
 void GS::clearDebugHistory()
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
     m_debugNextSeq = 1;
@@ -514,13 +514,13 @@ void GS::clearDebugHistory()
 
 bool GS::isDebugHistoryPaused() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_debugHistoryPaused;
 }
 
 void GS::setDebugHistoryPaused(bool paused)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     m_debugHistoryPaused = paused;
 }
 
@@ -702,7 +702,7 @@ void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp
 
 bool GS::getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (!m_hasPreferredDisplaySource)
     {
         outSource = {};
@@ -755,7 +755,7 @@ void GS::latchHostPresentationFrame()
 {
     GSPresentationRequest request{};
     {
-        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        std::lock_guard<GSStateMutex> lock(m_stateMutex);
         if (!m_backend || !m_privRegs)
         {
             std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
@@ -818,7 +818,7 @@ void GS::latchHostPresentationFrame()
 
     if (hasFrame)
     {
-        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        std::lock_guard<GSStateMutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred, request.vsyncTick);
     }
 }
@@ -845,7 +845,7 @@ void GS::recordAcquiredSharedFrame(const GSSharedPresent::Frame &frame)
     }
     if (changed && !frame.blank)
     {
-        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        std::lock_guard<GSStateMutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(frame.displayFbp, frame.sourceFbp,
                                         frame.width, frame.height, frame.usedPreferred, frame.vsyncTick);
     }
@@ -910,7 +910,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 // GOW-Port: the native shortcuts are only valid at the start of a tag of this PATH.
 bool GS::hasPendingGIFPacket(GifPathId path) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     const size_t index = static_cast<size_t>(path);
     return index == 0u || index >= m_gifInput.size() || m_gifInput[index].pending();
 }
@@ -946,7 +946,7 @@ void GS::stageMarker(const uint8_t *data, uint32_t sizeBytes)
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId path)
 {
     ps2_perf::Scope perf(ps2_perf::Bucket::Gs); // GOW-Port: includes rasterization and GIF transfers.
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (path == static_cast<GifPathId>(0))
     {
         stageMarker(data, sizeBytes); // GOW-Port: an early FINISH marker, not GIF data
@@ -1067,7 +1067,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId pat
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId path)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16u || !m_backend || hasPendingGIFPacket(path))
         return false;
 
@@ -1117,7 +1117,7 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            uint32_t sizeBytes,
                            uint64_t setupGifTag)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     // GOW-Port: DMA validates the whole chain before applying PRE/Q, under the same lock as the upload.
     if (data && sizeBytes && m_backend && (setupGifTag & 0x7FFFu) &&
         ((setupGifTag >> 58u) & 3u) == GIF_FMT_PACKED)
@@ -1415,7 +1415,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     writeRegisterUnlocked(regAddr, value);
 }
 
@@ -2009,19 +2009,19 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
 }
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
 }
 
@@ -2030,7 +2030,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
     if (!backend)
         backend = std::make_unique<GSNullBackend>();
 
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
     if (m_backend)
     {
@@ -2071,13 +2071,13 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 
 uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_backend ? m_backend->ReadVram(psm, base, bw, x, y) : 0u;
 }
 
 void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (m_backend)
         m_backend->WriteVram(psm, base, bw, x, y, value);
 }

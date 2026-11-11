@@ -50,12 +50,22 @@ pub struct Codegen {
     /// (those pass their pc to the slow path as `ps2AccessPc`), not around delay slots that read no pc, not before forward
     /// gotos or dispatched calls. Back edges, device accesses, syscalls and tail calls keep theirs.
     pub lean_pc: bool,
+    /// VU0 macro-mode fixes from gta-vcs-recomp: VCALLMSR starts at CMSAR0 (PS2Recomp read `vi[27]`, past the 16-entry
+    /// array) and VCLIPw sets the + bit for x > |w| and the - bit for x < -|w| (PS2Recomp swapped them and used w).
+    pub vu0_macro_fixes: bool,
 }
 
 impl Codegen {
     /// The switches `mode = "gow"` turns on.
     pub fn gow() -> Self {
-        Self { movz_low64: true, register_locals: false, cop0_count_clock: true, restrict_ctx: true, lean_pc: true }
+        Self {
+            movz_low64: true,
+            register_locals: false,
+            cop0_count_clock: true,
+            restrict_ctx: true,
+            lean_pc: true,
+            vu0_macro_fixes: true,
+        }
     }
 
     /// True when every switch is off: the output is PS2Recomp's.
@@ -349,6 +359,9 @@ impl RecompilerConfig {
             if let Some(value) = optional_bool(codegen, "lean_pc") {
                 config.codegen.lean_pc = value;
             }
+            if let Some(value) = optional_bool(codegen, "vu0_macro_fixes") {
+                config.codegen.vu0_macro_fixes = value;
+            }
         }
 
         Ok((config, report))
@@ -395,6 +408,7 @@ impl RecompilerConfig {
             codegen.insert("cop0_count_clock".to_owned(), Value::Boolean(self.codegen.cop0_count_clock));
             codegen.insert("restrict_ctx".to_owned(), Value::Boolean(self.codegen.restrict_ctx));
             codegen.insert("lean_pc".to_owned(), Value::Boolean(self.codegen.lean_pc));
+            codegen.insert("vu0_macro_fixes".to_owned(), Value::Boolean(self.codegen.vu0_macro_fixes));
             root.insert("codegen".to_owned(), Value::Table(codegen));
         }
 

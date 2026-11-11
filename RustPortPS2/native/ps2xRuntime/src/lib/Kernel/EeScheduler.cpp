@@ -4,6 +4,7 @@
 #include "runtime/ps2_perf.h"
 #include "../gow_frame_metrics.h" // GOW-Port: GOW_FRAME_DIAG
 #include "ps2_runtime_macros.h"
+#include "../gow_host_wait.h" // GOW-Port: timed waits without the libc++ spin on Windows
 
 #include <algorithm>
 #include <cassert>
@@ -2025,9 +2026,9 @@ void EeScheduler::processDueDeadlines()
             {
                 // GOW-Port: sleeping until the host VBlank/timer deadline is waiting, not EE work (ee_ms).
                 ps2_perf::Scope waitPerf(ps2_perf::Bucket::GuestWait);
-                m_eventCv.wait_until(lock, pacingDeadline, [this]()
-                                     { return !m_events.empty() ||
-                                              m_stopRequested.load(std::memory_order_acquire); });
+                gowWaitUntil(m_eventCv, lock, pacingDeadline, [this]() // GOW-Port: was m_eventCv.wait_until
+                             { return !m_events.empty() ||
+                                      m_stopRequested.load(std::memory_order_acquire); });
                 if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
                 {
                     updateNextDeadline();
@@ -2293,9 +2294,10 @@ void EeScheduler::waitForEvent()
         }
     }
 
-    const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
-                                               { return !m_events.empty() ||
-                                                        m_stopRequested.load(std::memory_order_acquire); });
+    // GOW-Port: gowWaitUntil (was m_eventCv.wait_until), see gow_host_wait.h.
+    const bool signaled = gowWaitUntil(m_eventCv, lock, hostDeadline, [this]()
+                                       { return !m_events.empty() ||
+                                                m_stopRequested.load(std::memory_order_acquire); });
     if (!signaled)
     {
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
