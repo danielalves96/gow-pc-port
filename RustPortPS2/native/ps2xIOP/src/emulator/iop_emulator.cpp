@@ -152,6 +152,7 @@ namespace ps2x::iop::detail
             modules.clear();
             nativeRanges.clear();
             nativeOverrides.clear();
+            rebuildOverrideBits();
             imports.reset();
             rpc.reset();
             cdvd.reset();
@@ -476,7 +477,9 @@ namespace ps2x::iop::detail
             }
 
             // GOW-Port: IRX functions replaced by native C++ run instead of the function (then return to $ra).
-            if (!nativeOverrides.empty())
+            // GOW-Port: step() runs once per native segment / interpreted instruction; a 64 KB bitmap (one bit per word of IOP
+            // RAM, set only at the ~27 override addresses) rejects the common case before the hash lookup.
+            if (!nativeOverrides.empty() && overrideBit(physicalAddress(cpu.pc)))
                 if (const auto found = nativeOverrides.find(physicalAddress(cpu.pc)); found != nativeOverrides.end())
                 {
                     IopNativeCall call{cpu, memory, host, *this};
@@ -976,6 +979,7 @@ namespace ps2x::iop::detail
                 for (size_t i = 0; i < overrideCount; ++i)
                     if (ident == overrides[i].module && overrides[i].offset < module.textSize)
                         nativeOverrides[lo + overrides[i].offset] = &overrides[i];
+                rebuildOverrideBits();
             }
             size_t count = 0;
             const IopNativeModule *table = iopNativeModules(count);
@@ -1024,6 +1028,7 @@ namespace ps2x::iop::detail
             const uint32_t lo = physicalAddress(it->second.base);
             std::erase_if(nativeRanges, [&](const NativeRange &r) { return r.lo == lo; });
             std::erase_if(nativeOverrides, [&](const auto &kv) { return kv.first >= lo && kv.first < lo + it->second.size; });
+            rebuildOverrideBits();
             rpc.removeServersInRange(it->second.base, it->second.size);
             imports.eraseRange(it->second.base, it->second.size);
             modules.erase(it);
@@ -1052,6 +1057,23 @@ namespace ps2x::iop::detail
         std::map<int, Module> modules;
         std::vector<NativeRange> nativeRanges;
         std::unordered_map<uint32_t, const IopNativeOverride *> nativeOverrides; // physical address -> handler
+        // GOW-Port: one bit per word of IOP RAM that has an entry in nativeOverrides (a pre-filter, see step()).
+        std::vector<uint64_t> overrideBits = std::vector<uint64_t>(kRamSize / 4u / 64u, 0u);
+        bool overrideBit(uint32_t physical) const noexcept
+        {
+            const uint32_t word = physical >> 2;
+            return (overrideBits[word >> 6] >> (word & 63u)) & 1u;
+        }
+        void rebuildOverrideBits()
+        {
+            std::fill(overrideBits.begin(), overrideBits.end(), uint64_t{0});
+            for (const auto &entry : nativeOverrides)
+                if (entry.first < kRamSize)
+                {
+                    const uint32_t word = entry.first >> 2;
+                    overrideBits[word >> 6] |= uint64_t{1} << (word & 63u);
+                }
+        }
 
         // IopNativeServices (for the native IRX overrides)
         void callGuestLater(uint32_t function, uint32_t gp, uint32_t a0, uint32_t a1, uint64_t delayCycles) override
