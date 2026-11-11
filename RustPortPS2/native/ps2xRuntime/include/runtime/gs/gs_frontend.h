@@ -230,7 +230,9 @@ private:
 
     void processImageData(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeBytes);
-    GSPrimitiveBatch buildDrawBatch(int vertexCount) const;
+    // GOW-Port: fills m_batch for the draw being kicked. The state part is rebuilt only when a register that feeds it was
+    // written since the last build (m_drawStateDirty); returns true when it was NOT rebuilt (same bytes as the previous draw).
+    bool fillDrawBatch(int vertexCount);
     void updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch);
     GSPresentationRequest buildPresentationRequestUnlocked() const;
 
@@ -257,6 +259,8 @@ private:
     std::array<GifInputState, 4> m_gifInput{};
 
     GSContext m_ctx[2];
+    GSPrimitiveBatch m_batch{};       // GOW-Port: persistent draw batch (state kept between draws, see fillDrawBatch)
+    bool m_drawStateDirty = true;     // GOW-Port: set by every write of a register that is part of GSDrawState, and by reset()
     GSPrimReg m_prim{};
     GSPrimReg m_primRegister{};
     GSPrimReg m_prmodeRegister{};

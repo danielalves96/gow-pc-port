@@ -118,7 +118,7 @@ void GSThreadedBackend::SetEnabledByDefault(bool enabled)
 }
 
 
-void GSThreadedBackend::Enqueue(Op op, const void *payload, uint32_t size)
+void GSThreadedBackend::Enqueue(Op op, const void *payload, uint32_t size, bool stateKnownSame)
 {
     std::lock_guard<GSProducerLock> lock(m_producerMutex);
     const uint32_t csr = _mm_getcsr();
@@ -146,8 +146,10 @@ void GSThreadedBackend::Enqueue(Op op, const void *payload, uint32_t size)
         // GOW-Port: field by field, not memcmp (padding bytes are unspecified: with clang no two states compared equal).
         // Identical bytes imply identical fields, so a memcmp that matches is conclusive and costs a few vector compares;
         // only a mismatch (a real change, or different padding) pays for the field-by-field comparison.
+        // GOW-Port: stateKnownSame (SubmitSameState): the frontend saw no state register change since the previous draw, so the
+        // bytes equal m_lastDrawState whenever that is valid; skip the comparison.
         if (!m_drawStateValid ||
-            !(std::memcmp(&m_lastDrawState, &draw.state, sizeof(draw.state)) == 0 || m_lastDrawState == draw.state))
+            (!stateKnownSame && !(std::memcmp(&m_lastDrawState, &draw.state, sizeof(draw.state)) == 0 || m_lastDrawState == draw.state)))
         {
             std::memcpy(&m_lastDrawState, &draw.state, sizeof(draw.state));
             m_drawStateValid = true;
@@ -332,6 +334,13 @@ void GSThreadedBackend::Submit(const GSPrimitiveBatch &batch)
     if (GsInventory::get().enabled())
         GsInventory::get().draw(batch);
     Enqueue(Op::Submit, &batch, sizeof(batch));
+}
+
+void GSThreadedBackend::SubmitSameState(const GSPrimitiveBatch &batch)
+{
+    if (GsInventory::get().enabled())
+        GsInventory::get().draw(batch);
+    Enqueue(Op::Submit, &batch, sizeof(batch), true);
 }
 
 void GSThreadedBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)

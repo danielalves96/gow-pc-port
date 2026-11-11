@@ -125,6 +125,7 @@ public:
     void Reset() override;
 
     void Submit(const GSPrimitiveBatch &batch) override;
+    void SubmitSameState(const GSPrimitiveBatch &batch) override;
     void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override;
 
     void BeginTransfer(const GSTransferCommand &command) override;
@@ -166,7 +167,7 @@ private:
         Call,
     };
 
-    void Enqueue(Op op, const void *payload, uint32_t size);
+    void Enqueue(Op op, const void *payload, uint32_t size, bool stateKnownSame = false);
     void PublishLocked();
     void Drain() const;
     void RunOnWorker(const std::function<void()> &function) const;

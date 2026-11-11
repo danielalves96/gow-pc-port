@@ -399,6 +399,7 @@ void GS::reset()
 {
     std::lock_guard<GSStateMutex> lock(m_stateMutex);
     std::memset(m_ctx, 0, sizeof(m_ctx));
+    m_drawStateDirty = true; // GOW-Port
     m_gifInput = {}; // GOW-Port: reset also discards incomplete tags/registers.
     m_prim = {};
     m_primRegister = {};
@@ -1502,6 +1503,14 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 {
+    // GOW-Port: every register except the vertex ones (RGBAQ, ST, UV, XYZF2, XYZ2, FOG, XYZF3, XYZ3) may change the draw state.
+    {
+        constexpr uint64_t kVertexRegs = (1ull << GS_REG_RGBAQ) | (1ull << GS_REG_ST) | (1ull << GS_REG_UV) |
+                                         (1ull << GS_REG_XYZF2) | (1ull << GS_REG_XYZ2) | (1ull << GS_REG_FOG) |
+                                         (1ull << GS_REG_XYZF3) | (1ull << GS_REG_XYZ3);
+        if (regAddr >= 64u || ((kVertexRegs >> regAddr) & 1ull) == 0ull)
+            m_drawStateDirty = true;
+    }
     const bool interestingReg =
         regAddr == GS_REG_PRIM ||
         regAddr == GS_REG_RGBAQ ||
@@ -2050,10 +2059,14 @@ void GS::vertexKick(bool drawing)
 
     if (drawing && m_backend)
     {
-        GSPrimitiveBatch batch = buildDrawBatch(needed);
+        const bool sameState = fillDrawBatch(needed);
+        const GSPrimitiveBatch &batch = m_batch;
         updatePreferredDisplaySourceForDraw(batch);
         gowFogDiagDraw(batch); // GOW-Port: PS2X_GS_FOG_DIAG.
-        m_backend->Submit(batch);
+        if (sameState)
+            m_backend->SubmitSameState(batch);
+        else
+            m_backend->Submit(batch);
         recordDrawDebugEventUnlocked(needed);
     }
 
@@ -2166,12 +2179,16 @@ void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_
         m_backend->WriteVram(psm, base, bw, x, y, value);
 }
 
-GSPrimitiveBatch GS::buildDrawBatch(int vertexCount) const
+bool GS::fillDrawBatch(int vertexCount)
 {
-    GSPrimitiveBatch batch{};
+    GSPrimitiveBatch &batch = m_batch;
     batch.vertexCount = static_cast<uint8_t>(std::min(vertexCount, 3));
     for (int i = 0; i < batch.vertexCount; ++i)
         batch.vertices[static_cast<size_t>(i)] = m_vtxQueue[i];
+    // GOW-Port: no register that is part of the draw state was written since the last build: the state bytes are the same.
+    if (!m_drawStateDirty)
+        return true;
+    m_drawStateDirty = false;
     // GOW-Port: the draw state is built from zeroed bytes and filled field by field (never by copying a padded struct), so
     // its padding is always zero. GSThreadedBackend::Enqueue then decides "same state as the previous draw" with one memcmp
     // instead of the out-of-line field-by-field operator== (3 % of the stage thread); the fields are the same.
@@ -2196,7 +2213,7 @@ GSPrimitiveBatch GS::buildDrawBatch(int vertexCount) const
     const uint8_t mmag = static_cast<uint8_t>((tex1 >> 5u) & 0x1u);
     const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6u) & 0x7u);
     batch.state.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
-    return batch;
+    return false;
 }
 
 void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
