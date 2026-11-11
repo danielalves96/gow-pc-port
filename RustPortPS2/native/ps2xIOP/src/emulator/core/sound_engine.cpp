@@ -722,16 +722,17 @@ namespace ps2x::iop::detail
                 const bool toRight = (c.vmixR & (1u << index)) != 0u;
                 const int32_t volL = volumeOf(c.voices[index].volL);
                 const int32_t volR = volumeOf(c.voices[index].volR);
+                // GOW-Port: the voice's samples first, then the mix as plain array loops the compiler can vectorize. A zero
+                // sample added (sample * vol) >> 14 == 0, so dropping the `sample == 0` skip changes nothing.
+                int32_t samples[kBatchFrames];
                 for (uint32_t f = 0; f < frames; ++f)
-                {
-                    const int32_t sample = stepVoice(c, index);
-                    if (sample == 0)
-                        continue;
-                    if (toLeft)
-                        dry[core][0][f] += (sample * volL) >> 14;
-                    if (toRight)
-                        dry[core][1][f] += (sample * volR) >> 14;
-                }
+                    samples[f] = stepVoice(c, index);
+                if (toLeft)
+                    for (uint32_t f = 0; f < frames; ++f)
+                        dry[core][0][f] += (samples[f] * volL) >> 14;
+                if (toRight)
+                    for (uint32_t f = 0; f < frames; ++f)
+                        dry[core][1][f] += (samples[f] * volR) >> 14;
             }
             for (uint32_t f = 0; f < frames; ++f)
                 streamSample(core, dry[core][0][f], dry[core][1][f]);
