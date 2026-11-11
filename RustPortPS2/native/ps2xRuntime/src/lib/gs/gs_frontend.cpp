@@ -1093,6 +1093,27 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId pat
             // GOW-Port: IMAGE2 also consumes its payload, without applying PRE.
             else if (input.format == GIF_FMT_IMAGE || input.format == GIF_FMT_IMAGE2)
                 input.imageBytes = nloop * 16u;
+
+            // GOW-Port: a PACKED tag whose whole payload is in this packet (nearly all of them: one XGKICK is one packet)
+            // runs its registers in a tight loop instead of going through the per-quadword cursor above for each one. It
+            // leaves the cursor as the loop above would after the last register: nothing left, register index 0.
+            if (input.format == GIF_FMT_PACKED && input.registersLeft &&
+                static_cast<uint64_t>(input.registersLeft) * 16u <= sizeBytes - offset)
+            {
+                const uint32_t nreg = input.nreg;
+                const uint8_t *payload = data + offset;
+                for (uint32_t loop = 0u; loop < nloop; ++loop)
+                {
+                    for (uint32_t r = 0u; r < nreg; ++r)
+                    {
+                        writeRegisterPacked(input.regs[r], loadLE64(payload), loadLE64(payload + 8u));
+                        payload += 16u;
+                    }
+                }
+                offset += input.registersLeft * 16u;
+                input.registersLeft = 0u;
+                input.regIndex = 0u;
+            }
         }
         else if (input.imageBytes)
         {
@@ -1938,24 +1959,30 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 void GS::vertexKick(bool drawing)
 {
     // GOW-Port: PS2X_GS_TRACE_TBP=<tbp0> logs the vertices that arrive with that texture active (-2: untextured fans, -3: textured fans).
+    // PS2X_GS_TRACE_AFTER=<seconds>: start the trace after those seconds from the first vertex.
+    // The settings are read once into one static (one guard check per vertex, not one per setting) and the trace
+    // conditions are only evaluated when PS2X_GS_TRACE_TBP is set at all.
+    struct TraceConfig
     {
-        static const long traceTbp = []
-        {
-            const char *v = std::getenv("PS2X_GS_TRACE_TBP");
-            return v ? std::strtol(v, nullptr, 10) : -1L;
-        }();
+        bool enabled;
+        long tbp;
+        long after;
+        std::chrono::steady_clock::time_point start;
+    };
+    static const TraceConfig trace = []
+    {
+        const char *tbp = std::getenv("PS2X_GS_TRACE_TBP");
+        const char *after = std::getenv("PS2X_GS_TRACE_AFTER");
+        return TraceConfig{tbp != nullptr, tbp ? std::strtol(tbp, nullptr, 10) : -1L, after ? std::strtol(after, nullptr, 10) : 0L,
+                           std::chrono::steady_clock::now()};
+    }();
+    if (trace.enabled)
+    {
         static int traced = 0;
-        // PS2X_GS_TRACE_AFTER=<seconds>: start the trace after those seconds from the first vertex.
-        static const long traceAfter = []
-        {
-            const char *v = std::getenv("PS2X_GS_TRACE_AFTER");
-            return v ? std::strtol(v, nullptr, 10) : 0L;
-        }();
-        static const auto traceStart = std::chrono::steady_clock::now();
         const GSContext &tc = m_ctx[m_prim.ctxt ? 1 : 0];
-        if (((traceTbp >= 0 && m_prim.tme && static_cast<long>(tc.tex0.tbp0) == traceTbp) ||
-             (traceTbp == -2 && !m_prim.tme && m_prim.type == GS_PRIM_TRIFAN) || (traceTbp == -3 && m_prim.tme && m_prim.type == GS_PRIM_TRIFAN)) && traced < 400 &&
-            std::chrono::steady_clock::now() - traceStart >= std::chrono::seconds(traceAfter))
+        if (((trace.tbp >= 0 && m_prim.tme && static_cast<long>(tc.tex0.tbp0) == trace.tbp) ||
+             (trace.tbp == -2 && !m_prim.tme && m_prim.type == GS_PRIM_TRIFAN) || (trace.tbp == -3 && m_prim.tme && m_prim.type == GS_PRIM_TRIFAN)) && traced < 400 &&
+            std::chrono::steady_clock::now() - trace.start >= std::chrono::seconds(trace.after))
         {
             ++traced;
             const GSVertex &v = m_vtxQueue[m_vtxCount % kMaxVerts];
