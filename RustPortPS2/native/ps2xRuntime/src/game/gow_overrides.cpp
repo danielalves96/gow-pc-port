@@ -62,6 +62,11 @@ namespace
         // The runtime's internal heap goes below the ELF (free memory) so it doesn't overlap the game's own heap,
         // which it creates with SetupHeap at the end of .bss (patches/ps2recomp-heap.patch).
         runtime.setPrivateGuestHeap(0x000A0000u, 0x000FF000u);
+        // A call through a bad function pointer (NULL or garbage) is skipped and logged ([gow-badcall]) instead of
+        // freezing the game: see PS2Runtime::dispatchGuestBranch. GOW_BAD_CALL_SKIP=0 keeps the former behaviour
+        // (the callers unwind and the main thread goes dormant), to debug the cause.
+        if (const char *skip = std::getenv("GOW_BAD_CALL_SKIP"); !skip || skip[0] != '0')
+            runtime.setMissingFunctionPolicy(PS2Runtime::MissingFunctionPolicy::SkipCallDebug);
         runtime.replaceFunction(0x00279600u, gowIpuInit);
         runtime.replaceFunction(0x0028C0C8u, gowRand);
         runtime.replaceFunction(0x0014C278u, gowOperatorNew);         // object guard (heap_guard)
@@ -69,6 +74,7 @@ namespace
         runtime.replaceFunction(0x00147520u, gowGuardTimelineChannels);
         runtime.replaceFunction(0x0023B6A0u, gowGuardNodeDestructor);
         runtime.replaceFunction(0x00149340u, gowGuardCloneList);
+        runtime.replaceFunction(0x001D6CD0u, gowGuardPlayerUpdate);
         if (std::getenv("GOW_FLASHQ_WATCH"))
         {
             runtime.replaceFunction(0x00146158u, gowFlashQueueDrain);

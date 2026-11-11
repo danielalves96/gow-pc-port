@@ -576,6 +576,36 @@ void register_ps2_runtime_expansion_tests()
                       "ContinueToTarget should remain a non-stopping debug policy");
         });
 
+        // GOW-Port: the policy the game runs with (gow_overrides.cpp)
+        tc.Run("SkipCallDebug skips a missing call and returns 0 to the caller", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.setMissingFunctionPolicy(
+                PS2Runtime::MissingFunctionPolicy::SkipCallDebug);
+
+            R5900Context ctx{};
+            ctx.pc = 0x2000u;
+            ctx.r[2] = _mm_set1_epi32(0x308B527B);
+
+            const bool continuedInCaller = runtime.dispatchGuestBranch(
+                nullptr,
+                &ctx,
+                0x308B527Bu,
+                0x2000u,
+                0x2008u,
+                PS2Runtime::GuestBranchKind::IndirectCall,
+                "test-missing-skip");
+
+            t.IsTrue(continuedInCaller,
+                     "SkipCallDebug must resume the caller after the call");
+            t.Equals(ctx.pc, 0x2008u,
+                     "the caller should continue at the fallthrough");
+            t.Equals(static_cast<uint32_t>(_mm_cvtsi128_si32(ctx.r[2])), 0u,
+                     "the skipped call should return 0");
+            t.IsFalse(runtime.isStopRequested(),
+                      "SkipCallDebug should not stop the runtime");
+        });
+
         tc.Run("MPEG init and callback stubs return success instead of TODO errors", [](TestCase &t)
         {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);

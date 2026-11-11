@@ -108,6 +108,13 @@ namespace gow_game
     void gowOperatorDelete(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t block = GPR_U32(ctx, 4), ra = GPR_U32(ctx, 31);
+        // delete of NULL does nothing. It is reached after a skipped virtual destructor call on a NULL UI node
+        // ([gow-badcall], issue #20: 0x149340 makes that call at 0x149390 and calls delete at 0x1493BC).
+        if (block == 0u && ctx->pc == 0x0014C2F0u)
+        {
+            ctx->pc = ra;
+            return;
+        }
         // 0x143C78 (string delete) keeps its caller at 0($sp)
         const uint32_t caller = ra == 0x00143C8Cu ? readGuest32(rdram, GPR_U32(ctx, 29)) : ra;
         if (block == flashqWatch())
@@ -207,7 +214,21 @@ namespace gow_game
         const uint32_t first = list < 0x02000000u ? readGuest32(rdram, list + 0x18u) : 0u;
         const int32_t count = list < 0x02000000u ? static_cast<int32_t>(readGuest32(rdram, list + 0x1Cu)) : 0;
         const uint32_t entries = list < 0x02000000u ? readGuest32(rdram, list + 0x20u) : 0u;
-        if (count > 0 && count < 0x10000 && entries != 0u && entries < 0x02000000u)
+        // Issue #20 froze in the first pass of the loop on a NULL node although nothing was dropped here: the header
+        // itself was out of the range checked below (the loop reads the count again in every pass and would walk
+        // whatever follows). Such a list is emptied instead; an entries pointer that is not a live block is not deleted.
+        if (ctx->pc == 0x00149340u && list != 0u && list < 0x02000000u &&
+            (count >= 0x10000 || (count > 0 && (entries == 0u || entries >= 0x02000000u))))
+        {
+            heap_guard::report("clone list: bad header, treated as empty", list, GPR_U32(ctx, 31));
+            std::fprintf(stderr, "[gow-heapguard] clone list header first=0x%x count=0x%x entries=0x%x\n", first,
+                         static_cast<uint32_t>(count), entries);
+            writeGuest32(rdram, list + 0x1Cu, 0u);
+            const auto it = heap_guard::blocks.find(entries);
+            if (it == heap_guard::blocks.end() || !it->second.live)
+                writeGuest32(rdram, list + 0x20u, 0u);
+        }
+        else if (count > 0 && count < 0x10000 && entries != 0u && entries < 0x02000000u)
         {
             uint32_t kept = 0;
             for (uint32_t i = 0; i < static_cast<uint32_t>(count); ++i)
@@ -227,5 +248,27 @@ namespace gow_game
             writeGuest32(rdram, list + 0x1Cu, kept);
         }
         sub_00149340_0x149340(rdram, ctx, runtime);
+    }
+
+    // 0x1D6CD0(a0 player controller 0x29CD58, whose first field is Kratos): called every frame by 0x21FDA0 in the
+    // playing game states when the controller exists. It copies the magic and blade levels of the UI variables into
+    // Kratos's state and then makes a virtual call on Kratos (vtable +0x6C) with no NULL check. In issue #37 Kratos
+    // was still NULL in the first frames after the movie before Pandora's Temple: the vtable was read from address 4
+    // and the call went to 0x308B527B, which froze the game. Without Kratos the frame's update is skipped.
+    void gowGuardPlayerUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t controller = GPR_U32(ctx, 4);
+        if (ctx->pc == 0x001D6CD0u && controller != 0u && controller < 0x02000000u && readGuest32(rdram, controller) == 0u)
+        {
+            static unsigned reports = 0;
+            if (reports < 5u)
+            {
+                ++reports;
+                std::fprintf(stderr, "[gow-heapguard] player update skipped: the controller 0x%x has no Kratos yet\n", controller);
+            }
+            ctx->pc = GPR_U32(ctx, 31);
+            return;
+        }
+        sub_001D6CD0_0x1d6cd0(rdram, ctx, runtime);
     }
 }

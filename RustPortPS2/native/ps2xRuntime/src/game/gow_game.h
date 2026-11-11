@@ -55,6 +55,7 @@ namespace gow_game
     void gowGuardTimelineChannels(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowGuardNodeDestructor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowGuardCloneList(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void gowGuardPlayerUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowHeapZeroAlloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowFlashQueueDrain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowFlashQueueAppend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

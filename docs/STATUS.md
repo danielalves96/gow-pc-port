@@ -78,6 +78,21 @@ Last reviewed: October 2026, against the code in this repository.
   game yet. Which command misaligns the stream is not known: the first faults now print the commands before them.
 - **Character stuck after the sixth Gorgon Eye (issue #35):** reproduced by one player many times; the log just stops,
   with no hang report. Since 0.3.4 a crash leaves a `[gow-crash]` line and the log is no longer cut at exit. Not fixed.
+- **Permanent freeze after a call through a bad function pointer (issues #20 and #37):** in both reports the game made
+  an indirect call to an address that is not a function (#20: to 0, from the UI timeline's clip list `0x149340`, on the
+  way from the docks to the first Medusa; #37: to `0x308B527B`, from the per-frame function `0x1D6CD0`, right after the
+  movie of Kratos climbing Cronos, on a translated disc). The callers unwound, the main thread went dormant and the
+  picture froze. Since 0.3.4:
+  - #37: `0x1D6CD0` makes a virtual call on Kratos (the first field of the player controller `0x29CD58`) with no NULL
+    check, and Kratos was still NULL in the first frames after the movie, so the vtable was read from address 4. The
+    update is skipped while there is no Kratos (`[gow-heapguard] player update skipped`). Why Kratos is missing there
+    (the experimental 120 Hz logic was on and the disc was a translation) is not known.
+  - #20: the guard of `0x149340` reported nothing, so the list header itself was outside the range it checked; a list
+    with such a header is now emptied (`[gow-heapguard] clone list: bad header`). What corrupts the header is not known.
+  - Any other call to an address that is not a function is skipped and logged (`[gow-badcall]`, `GOW_BAD_CALL_SKIP=0`
+    to turn it off) instead of freezing the game.
+
+  None of the three was reproduced in game: the fixes come from the two logs and the disassembly.
 - **Windows Release build:** the default installer configuration (no whole-program optimization, AVX2 off) has never
   been compared in game against the faster development build. Numbers measured in a development build may
   not carry over.

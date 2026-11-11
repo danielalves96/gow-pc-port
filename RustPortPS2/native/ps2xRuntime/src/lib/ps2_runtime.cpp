@@ -1574,6 +1574,22 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
         if (policy == MissingFunctionPolicy::SkipCallDebug && isCall)
         {
+            // GOW-Port: the game runs with this policy (gow_overrides.cpp). Leaving ctx->pc on a target that is not
+            // a function unwinds every caller and the main thread goes dormant: the picture freezes for good
+            // (issue #20: JALR to 0 at 0x149390 through a NULL UI timeline node; issue #37: JALR to 0x308B527B at
+            // 0x1D6D44). The call is skipped as if the callee had returned 0. reportMissingFunction prints the
+            // registers of the first one only, so each one is logged here, the first three with the last branches.
+            static unsigned skipped = 0;
+            if (skipped < 50u)
+            {
+                ++skipped;
+                std::fprintf(stderr, "[gow-badcall] call to 0x%x at 0x%x skipped (a0=0x%x ra=0x%x)\n", targetPc, sourcePc,
+                             static_cast<uint32_t>(_mm_cvtsi128_si32(ctx->r[4])),
+                             static_cast<uint32_t>(_mm_cvtsi128_si32(ctx->r[31])));
+                if (skipped <= 3u)
+                    gowDumpBranchRing("call to a missing function skipped");
+            }
+            ctx->r[2] = _mm_setzero_si128();
             ctx->pc = fallthroughPc;
             return true;
         }
