@@ -132,6 +132,14 @@ namespace
         dst.fba = src.fba;
     }
 
+    // GOW-Port: PS2X_GS_TRACE_TBP output, out of line so the iostream code does not weigh on GS::vertexKick.
+    __attribute__((noinline, cold)) void traceVertex(GSPrimType type, bool drawing, int count, const GSVertex &v)
+    {
+        std::cerr << "[gs:trace] prim=" << static_cast<unsigned>(type) << " draw=" << drawing
+                  << " cnt=" << count << " xy=(" << v.x << "," << v.y << ") stq=(" << v.s << "," << v.t
+                  << "," << v.q << ") uv=(" << (v.u >> 4) << "," << (v.v >> 4) << ") a=" << static_cast<unsigned>(v.a) << " r=" << static_cast<unsigned>(v.r) << std::endl;
+    }
+
     bool gowFogOff()
     {
         static const bool off = []
@@ -153,11 +161,10 @@ namespace
         double zMax = -1e300;
     };
 
-    void gowFogDiagDraw(const GSPrimitiveBatch &batch)
+    // GOW-Port: the body is kept out of line (it was inlined into GS::vertexKick, giving that function a 1.2 KB frame and
+    // a prologue that saves every callee-saved register on each vertex, diagnostics or not).
+    __attribute__((noinline)) void gowFogDiagDrawSlow(const GSPrimitiveBatch &batch, long startSeconds)
     {
-        const long startSeconds = gowFogDiagStart();
-        if (startSeconds < 0)
-            return;
         using Clock = std::chrono::steady_clock;
         static const Clock::time_point first = Clock::now();
         static std::map<std::string, GowFogDiagAgg> aggs;
@@ -241,6 +248,13 @@ namespace
             a.zMin = std::min(a.zMin, v[i].z);
             a.zMax = std::max(a.zMax, v[i].z);
         }
+    }
+
+    inline void gowFogDiagDraw(const GSPrimitiveBatch &batch)
+    {
+        const long startSeconds = gowFogDiagStart();
+        if (startSeconds >= 0)
+            gowFogDiagDrawSlow(batch, startSeconds);
     }
 
     // GOW-Port: both CPU/GPU paths return 640-wide rows; the captures are compact.
@@ -1985,10 +1999,7 @@ void GS::vertexKick(bool drawing)
             std::chrono::steady_clock::now() - trace.start >= std::chrono::seconds(trace.after))
         {
             ++traced;
-            const GSVertex &v = m_vtxQueue[m_vtxCount % kMaxVerts];
-            std::cerr << "[gs:trace] prim=" << static_cast<unsigned>(m_prim.type) << " draw=" << drawing
-                      << " cnt=" << m_vtxCount << " xy=(" << v.x << "," << v.y << ") stq=(" << v.s << "," << v.t
-                      << "," << v.q << ") uv=(" << (v.u >> 4) << "," << (v.v >> 4) << ") a=" << static_cast<unsigned>(v.a) << " r=" << static_cast<unsigned>(v.r) << std::endl;
+            traceVertex(m_prim.type, drawing, m_vtxCount, m_vtxQueue[m_vtxCount % kMaxVerts]);
         }
     }
     ++m_vtxCount;
