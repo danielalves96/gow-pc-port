@@ -18,9 +18,11 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_perf.h" // GOW-Port: hitch report buckets
 #include "raylib.h"
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <atomic>
 #include <chrono>
@@ -43,6 +45,8 @@
 #include "gow_image.h"
 #include "gow_frame.h"
 #include "gow_quality.h"
+// GOW-Port: hitch report counters (gs_hw_backend.cpp)
+extern std::atomic<uint64_t> g_gowHitchTexDecodes, g_gowHitchTexDecodeNs, g_gowHitchTexTexels, g_gowHitchTargets;
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
@@ -255,6 +259,47 @@ namespace
 
     std::atomic<R5900Context *> g_gameFrameContext{nullptr}; // GOW_STALL_DIAG: the main thread's context, read live
 
+    // GOW-Port: what a slow game frame spent its time on, appended to its "stutter of" line: the [gow-perf] buckets of
+    // every thread (EE, VU, GS, IOP, waits, upload; with GOW_PERF_DIAG=1, set by the launcher) and the GS texture decodes
+    // and new render targets (gs_hw_backend.cpp) between the frame's start and its end. A bucket is charged when its
+    // thread leaves it, so a long stretch can land in the next frame.
+    struct GowHitchSnapshot
+    {
+        std::array<uint64_t, ps2_perf::bucketCount> nanos{};
+        uint64_t texDecodes = 0, texDecodeNs = 0, texTexels = 0, targets = 0;
+
+        static GowHitchSnapshot take()
+        {
+            GowHitchSnapshot s;
+            for (size_t i = 0; i < ps2_perf::bucketCount; ++i)
+                s.nanos[i] = ps2_perf::nanos[i].load(std::memory_order_relaxed);
+            s.texDecodes = g_gowHitchTexDecodes.load(std::memory_order_relaxed);
+            s.texDecodeNs = g_gowHitchTexDecodeNs.load(std::memory_order_relaxed);
+            s.texTexels = g_gowHitchTexTexels.load(std::memory_order_relaxed);
+            s.targets = g_gowHitchTargets.load(std::memory_order_relaxed);
+            return s;
+        }
+    };
+    GowHitchSnapshot g_gowHitchLast;
+
+    void gowReportHitch(double ms, double at, const GowHitchSnapshot &now, const GowHitchSnapshot &before)
+    {
+        const auto bucketMs = [&](ps2_perf::Bucket b)
+        {
+            const size_t i = static_cast<size_t>(b);
+            return static_cast<double>(now.nanos[i] - before.nanos[i]) * 1e-6;
+        };
+        std::fprintf(stderr,
+                     "[gow-frames] stutter of %.0f ms at t=%.3f ee=%.1f vu=%.1f gs=%.1f iop=%.1f guest_wait=%.1f upload=%.1f "
+                     "host_wait=%.1f tex_decodes=%llu tex_ms=%.1f tex_ktexels=%.0f new_targets=%llu\n",
+                     ms, at, bucketMs(ps2_perf::Bucket::Ee), bucketMs(ps2_perf::Bucket::Vu), bucketMs(ps2_perf::Bucket::Gs),
+                     bucketMs(ps2_perf::Bucket::Iop), bucketMs(ps2_perf::Bucket::GuestWait), bucketMs(ps2_perf::Bucket::Upload),
+                     bucketMs(ps2_perf::Bucket::HostWait), static_cast<unsigned long long>(now.texDecodes - before.texDecodes),
+                     static_cast<double>(now.texDecodeNs - before.texDecodeNs) * 1e-6,
+                     static_cast<double>(now.texTexels - before.texTexels) / 1000.0,
+                     static_cast<unsigned long long>(now.targets - before.targets));
+    }
+
     void gameFrameHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_gameFrameContext.store(ctx, std::memory_order_relaxed);
@@ -304,8 +349,10 @@ namespace
                     over100 += ms > 100.0;
                     // GOW-Port: GOW_FRAMES_HITCH_LOG=1 also logs every frame over 50 ms, with the time, to find what they line up with.
                     static const bool hitchLog = envFlag("GOW_FRAMES_HITCH_LOG", false);
+                    const GowHitchSnapshot snapshot = GowHitchSnapshot::take();
                     if (ms > 100.0 || (hitchLog && ms > 50.0))
-                        std::fprintf(stderr, "[gow-frames] stutter of %.0f ms at t=%.3f\n", ms, std::chrono::duration<double>(now - start).count());
+                        gowReportHitch(ms, std::chrono::duration<double>(now - start).count(), snapshot, g_gowHitchLast);
+                    g_gowHitchLast = snapshot;
                     if (ms > 1000.0)
                         ps2_stubs::logMemoryCardDebugSnapshot();
                 }

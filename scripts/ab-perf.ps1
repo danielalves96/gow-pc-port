@@ -79,6 +79,9 @@ $envSet['GOW_FRAME_DIAG'] = '1'
 if ($PadScript) {
     $envSet['GOW_PAD_TEST'] = '1'
     $envSet['GOW_PAD_SCRIPT'] = $PadScript
+    # The pad test saves a screenshot every 10-20 s by default (gow_pad_test.cpp): each one is a 160-190 ms frame that
+    # players never see and that counted as a hitch. -Set 'GOW_PAD_TEST_NO_CAPTURE=0' brings them back.
+    $envSet['GOW_PAD_TEST_NO_CAPTURE'] = '1'
 }
 function ConvertTo-Pairs([string[]]$items, [string]$parameter) {
     $pairs = [ordered]@{}

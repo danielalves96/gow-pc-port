@@ -8,6 +8,7 @@
 #include "runtime/gs/gs_texture_replace.h"
 
 #include <array>
+#include <atomic>
 #include <map>
 #include <algorithm>
 #include <chrono>
@@ -26,6 +27,28 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// GOW-Port: per-frame hitch report (gow_integration.cpp, GOW_FRAMES_HITCH_LOG): texture decodes (with their upload) and
+// new render targets, summed here and read as deltas around each slow game frame.
+std::atomic<uint64_t> g_gowHitchTexDecodes{0}, g_gowHitchTexDecodeNs{0}, g_gowHitchTexTexels{0}, g_gowHitchTargets{0};
+
+namespace
+{
+    struct GowDecodeTimer
+    {
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        explicit GowDecodeTimer(uint64_t texels)
+        {
+            g_gowHitchTexDecodes.fetch_add(1, std::memory_order_relaxed);
+            g_gowHitchTexTexels.fetch_add(texels, std::memory_order_relaxed);
+        }
+        ~GowDecodeTimer()
+        {
+            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
+            g_gowHitchTexDecodeNs.fetch_add(static_cast<uint64_t>(ns.count()), std::memory_order_relaxed);
+        }
+    };
+}
 
 namespace
 {
@@ -563,6 +586,78 @@ struct GSHwBackend::Impl
     // target: DATE, blending in the shader, Z in the color). Fewer GPU registers and branches: most of the game's batches
     // only sample one texture. GOW_GS_FAST=0 disables it.
     GLuint programFast = 0, activeProgram = 0;
+    // GOW-Port: the last value draw() wrote to each of its uniforms, per program (GL keeps uniform values per program).
+    // draw() wrote 25-40 uniforms for every batch, most of them unchanged; skipping the repeats is what gta-vcs-recomp
+    // measured at ~10 % on an Intel HD 520. Only the uniforms draw() writes go through it: no other code writes them, and
+    // draw() binds the program first. Reset when the programs are created.
+    struct UniformShadow
+    {
+        static constexpr GLint kSlots = 128;
+        GLuint program = 0;
+        std::array<std::array<int32_t, 4>, kSlots> value{};
+        std::array<bool, kSlots> set{};
+    };
+    UniformShadow uniformShadow[2];
+    uint64_t uniformWrites = 0, uniformSkips = 0;
+
+    // True when `loc` of the active program must be written with these words (and records them).
+    bool uniformChanged(GLint loc, int32_t a, int32_t b = 0, int32_t c = 0, int32_t d = 0)
+    {
+        if (loc < 0)
+            return false; // GL ignores location -1
+        UniformShadow *shadow = nullptr;
+        for (UniformShadow &u : uniformShadow)
+            if (u.program == activeProgram)
+                shadow = &u;
+        if (!shadow)
+            for (UniformShadow &u : uniformShadow)
+                if (u.program == 0u && !shadow)
+                {
+                    u.program = activeProgram;
+                    shadow = &u;
+                }
+        if (!shadow || loc >= UniformShadow::kSlots)
+        {
+            ++uniformWrites;
+            return true;
+        }
+        const std::array<int32_t, 4> words{a, b, c, d};
+        if (shadow->set[static_cast<size_t>(loc)] && shadow->value[static_cast<size_t>(loc)] == words)
+        {
+            ++uniformSkips;
+            return false;
+        }
+        shadow->set[static_cast<size_t>(loc)] = true;
+        shadow->value[static_cast<size_t>(loc)] = words;
+        ++uniformWrites;
+        return true;
+    }
+    static int32_t floatWord(float value)
+    {
+        int32_t word;
+        std::memcpy(&word, &value, sizeof(word));
+        return word;
+    }
+    void setUniform1i(GLint loc, GLint x)
+    {
+        if (uniformChanged(loc, x))
+            gl().Uniform1i(loc, x);
+    }
+    void setUniform1f(GLint loc, float x)
+    {
+        if (uniformChanged(loc, floatWord(x)))
+            gl().Uniform1f(loc, x);
+    }
+    void setUniform2f(GLint loc, float x, float y)
+    {
+        if (uniformChanged(loc, floatWord(x), floatWord(y)))
+            gl().Uniform2f(loc, x, y);
+    }
+    void setUniform4i(GLint loc, GLint x, GLint y, GLint z, GLint w)
+    {
+        if (uniformChanged(loc, x, y, z, w))
+            gl().Uniform4i(loc, x, y, z, w);
+    }
     const bool fastShaderEnabled = [] { const char *e = std::getenv("GOW_GS_FAST"); return !e || *e != '0'; }();
     uint64_t fastBatches = 0, fullBatches = 0;
     // GOW_GS_ALPHA_BOUNDS=0 disables the alpha bounds (see the alpha test in draw)
@@ -810,6 +905,7 @@ struct GSHwBackend::Impl
             failed = true;
             return false;
         }
+        uniformShadow[0] = uniformShadow[1] = UniformShadow{}; // GOW-Port: new programs, nothing written yet
         program = g.CreateProgram();
         g.AttachShader(program, v);
         g.AttachShader(program, f);
@@ -1076,6 +1172,7 @@ struct GSHwBackend::Impl
 
     void createTarget(RenderTarget &t, uint32_t fbp, uint32_t fbw)
     {
+        g_gowHitchTargets.fetch_add(1, std::memory_order_relaxed); // GOW-Port: hitch report
         const Api &g = gl();
         t.fbp = fbp;
         t.psm = 0;
@@ -1345,6 +1442,7 @@ struct GSHwBackend::Impl
             return tex;
         }
         ++stats.texDecodes;
+        const GowDecodeTimer decodeTimer(static_cast<uint64_t>(s.textureWidth) * s.textureHeight); // GOW-Port: hitch report
         classifyTexture(s);
         const Api &g = gl();
         std::vector<uint32_t> pixels;
@@ -1460,6 +1558,7 @@ struct GSHwBackend::Impl
             return tex;
         }
         ++stats.texDecodes;
+        const GowDecodeTimer decodeTimer(static_cast<uint64_t>(s.textureWidth) * s.textureHeight); // GOW-Port: hitch report
         classifyTexture(s);
         tex.width = std::max<uint32_t>(1u, s.textureWidth);
         tex.height = std::max<uint32_t>(1u, s.textureHeight);
@@ -2710,32 +2809,32 @@ struct GSHwBackend::Impl
         if (!fast)
         {
             const bool date = dateTest;
-            g.Uniform1i(locDate, date ? 1 : 0);
-            g.Uniform1i(locDatm, ((c.test >> 15) & 1u) != 0u ? 1 : 0);
+            setUniform1i(locDate, date ? 1 : 0);
+            setUniform1i(locDatm, ((c.test >> 15) & 1u) != 0u ? 1 : 0);
             const uint64_t al = c.alpha;
-            g.Uniform1i(locSwBlend, softBlend && !zAliasWrite ? 1 : 0);
-            g.Uniform1i(locColClamp, (s.colclamp & 1u) != 0u ? 1 : 0);
-            g.Uniform4i(locAbcd, static_cast<GLint>(al & 3u), static_cast<GLint>((al >> 2) & 3u), static_cast<GLint>((al >> 4) & 3u), static_cast<GLint>((al >> 6) & 3u));
-            g.Uniform1f(locFix, static_cast<float>((al >> 32) & 0xFFu));
-            g.Uniform1i(locZAlias, zAlias ? 1 + static_cast<GLint>(ztst) : 0);
-            g.Uniform1i(locZAliasWrite, zAliasWrite ? 1 : 0);
-            g.Uniform1f(locZAliasMax, zMaxFor(c.zbuf.psm));
+            setUniform1i(locSwBlend, softBlend && !zAliasWrite ? 1 : 0);
+            setUniform1i(locColClamp, (s.colclamp & 1u) != 0u ? 1 : 0);
+            setUniform4i(locAbcd, static_cast<GLint>(al & 3u), static_cast<GLint>((al >> 2) & 3u), static_cast<GLint>((al >> 4) & 3u), static_cast<GLint>((al >> 6) & 3u));
+            setUniform1f(locFix, static_cast<float>((al >> 32) & 0xFFu));
+            setUniform1i(locZAlias, zAlias ? 1 + static_cast<GLint>(ztst) : 0);
+            setUniform1i(locZAliasWrite, zAliasWrite ? 1 : 0);
+            setUniform1f(locZAliasMax, zMaxFor(c.zbuf.psm));
             if (date || softBlend || zAlias)
             {
                 g.ActiveTexture(kTexture0 + 4);
                 g.BindTexture(kTexture2D, rt.color);
-                g.Uniform1i(locDest, 4);
+                setUniform1i(locDest, 4);
                 g.ActiveTexture(kTexture0);
                 g.TextureBarrier();
             }
         }
-        g.Uniform2f(locInvSize, 1.0f / rt.pxW, 1.0f / rt.pxH);
-        g.Uniform1i(locTme, s.prim.tme ? 1 : 0);
-        g.Uniform1i(locFst, s.prim.fst ? 1 : 0);
-        g.Uniform1i(locIip, s.prim.iip ? 1 : 0);
-        g.Uniform1i(locTfx, c.tex0.tfx);
-        g.Uniform1i(locTcc, c.tex0.tcc);
-        g.Uniform1f(locBlendScale, 1.0f / 128.0f);
+        setUniform2f(locInvSize, 1.0f / rt.pxW, 1.0f / rt.pxH);
+        setUniform1i(locTme, s.prim.tme ? 1 : 0);
+        setUniform1i(locFst, s.prim.fst ? 1 : 0);
+        setUniform1i(locIip, s.prim.iip ? 1 : 0);
+        setUniform1i(locTfx, c.tex0.tfx);
+        setUniform1i(locTcc, c.tex0.tcc);
+        setUniform1f(locBlendScale, 1.0f / 128.0f);
         int texAMin = 0, texAMax = 255; // GOW-Port: bounds of the sampled texel's alpha (255 = unknown)
         if (s.prim.tme)
         {
@@ -2749,8 +2848,8 @@ struct GSHwBackend::Impl
             Texture *const boundTexture = (src || rsrc || zsrc) ? nullptr : &tex;
             if (!(src || rsrc || zsrc) && !indexed)
                 texAMin = tex.minA, texAMax = tex.maxA;
-            g.Uniform1i(locIndexed, indexed ? 1 : 0);
-            g.Uniform1i(locLinear, s.linearFilter ? 1 : 0);
+            setUniform1i(locIndexed, indexed ? 1 : 0);
+            setUniform1i(locLinear, s.linearFilter ? 1 : 0);
             if (indexed)
             {
                 g.ActiveTexture(kTexture0 + 5);
@@ -2765,24 +2864,24 @@ struct GSHwBackend::Impl
                     if (lo <= hi)
                         texAMin = lo, texAMax = hi;
                 }
-                g.Uniform1i(locIdxPalette, 5);
-                g.Uniform4i(locWrap, (c.clamp & 3u) == 0u ? 0 : 1, ((c.clamp >> 2) & 3u) == 0u ? 0 : 1, 0, 0);
+                setUniform1i(locIdxPalette, 5);
+                setUniform4i(locWrap, (c.clamp & 3u) == 0u ? 0 : 1, ((c.clamp >> 2) & 3u) == 0u ? 0 : 1, 0, 0);
             }
             g.ActiveTexture(kTexture0);
             g.BindTexture(kTexture2D, zsrc ? zsrc->depth : src ? src->color : rsrc ? rsrc->color : tex.id);
             if (!fast)
             {
-                g.Uniform1i(locZTex, !zsrc ? 0 : c.tex0.psm == 0x32 || c.tex0.psm == 0x3A ? 16 : c.tex0.psm == 0x31 ? 24 : 32);
-                g.Uniform1f(locZMax, zsrc ? zMaxFor(static_cast<uint8_t>(c.tex0.psm)) : 1.0f);
+                setUniform1i(locZTex, !zsrc ? 0 : c.tex0.psm == 0x32 || c.tex0.psm == 0x3A ? 16 : c.tex0.psm == 0x31 ? 24 : 32);
+                setUniform1f(locZMax, zsrc ? zMaxFor(static_cast<uint8_t>(c.tex0.psm)) : 1.0f);
             }
-            g.Uniform1i(locRtTex24, !(src || rsrc) ? 0 : c.tex0.psm == GS_PSM_CT24 ? 1 : family16(c.tex0.psm) ? 2 : 0);
+            setUniform1i(locRtTex24, !(src || rsrc) ? 0 : c.tex0.psm == GS_PSM_CT24 ? 1 : family16(c.tex0.psm) ? 2 : 0);
             if (!fast)
-                g.Uniform1i(locReinterp, rsrc ? 1 : 0);
+                setUniform1i(locReinterp, rsrc ? 1 : 0);
             if (rsrc)
                 setupReinterpret(s, *rsrc);
-            g.Uniform1f(locTa0, static_cast<float>(s.texa.ta0));
-            g.Uniform1f(locTa1, static_cast<float>(s.texa.ta1));
-            g.Uniform1i(locAem, s.texa.aem ? 1 : 0);
+            setUniform1f(locTa0, static_cast<float>(s.texa.ta0));
+            setUniform1f(locTa1, static_cast<float>(s.texa.ta1));
+            setUniform1i(locAem, s.texa.aem ? 1 : 0);
             const GLint filter = (indexed || zsrc) ? kNearest : s.linearFilter ? kLinear : kNearest;
             const uint64_t clamp = c.clamp;
             const GLint wu = (clamp & 3u) == 0u ? kRepeat : kClampToEdge, wv = ((clamp >> 2) & 3u) == 0u ? kRepeat : kClampToEdge;
@@ -2802,18 +2901,18 @@ struct GSHwBackend::Impl
             setSampler(kTextureMagFilter, filter, boundTexture ? &boundTexture->magFilter : nullptr);
             setSampler(kTextureWrapS, wu, boundTexture ? &boundTexture->wrapS : nullptr);
             setSampler(kTextureWrapT, wv, boundTexture ? &boundTexture->wrapT : nullptr);
-            g.Uniform1i(locTex, 0);
-            g.Uniform2f(locTexDim, static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), static_cast<float>(std::max<uint16_t>(s.textureHeight, 1)));
+            setUniform1i(locTex, 0);
+            setUniform2f(locTexDim, static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), static_cast<float>(std::max<uint16_t>(s.textureHeight, 1)));
             if (zsrc)
             {
-                g.Uniform2f(locTexSize, static_cast<float>(zsrc->pxW), static_cast<float>(zsrc->pxH));
+                setUniform2f(locTexSize, static_cast<float>(zsrc->pxW), static_cast<float>(zsrc->pxH));
             }
             else if (src)
-                g.Uniform2f(locTexSize, static_cast<float>(src->pxW), static_cast<float>(src->pxH));
+                setUniform2f(locTexSize, static_cast<float>(src->pxW), static_cast<float>(src->pxH));
             else if (replacement) // the PS2 texture's size: the coordinates keep their meaning whatever the replacement's resolution
-                g.Uniform2f(locTexSize, static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), static_cast<float>(std::max<uint16_t>(s.textureHeight, 1)));
+                setUniform2f(locTexSize, static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), static_cast<float>(std::max<uint16_t>(s.textureHeight, 1)));
             else
-                g.Uniform2f(locTexSize, static_cast<float>(tex.width), static_cast<float>(tex.height));
+                setUniform2f(locTexSize, static_cast<float>(tex.width), static_cast<float>(tex.height));
         }
         g.BindVertexArray(vao);
         g.BindBuffer(kArrayBuffer, vbo);
@@ -2838,9 +2937,9 @@ struct GSHwBackend::Impl
             ++stats.testHist[(ate ? 1ull : 0ull) | (static_cast<uint64_t>(atst) << 1) | (static_cast<uint64_t>(afail) << 4) |
                              (static_cast<uint64_t>(aref) << 8) | (s.prim.tme ? 1ull << 16 : 0ull) | (s.prim.abe ? 1ull << 17 : 0ull)];
         }
-        g.Uniform1i(locAte, ate ? 1 : 0);
-        g.Uniform1i(locAtst, static_cast<GLint>(atst));
-        g.Uniform1i(locAref, static_cast<GLint>(aref));
+        setUniform1i(locAte, ate ? 1 : 0);
+        setUniform1i(locAtst, static_cast<GLint>(atst));
+        setUniform1i(locAref, static_cast<GLint>(aref));
         static const bool forceNoTest = std::getenv("GOW_GS_HW_NOATEST") != nullptr;
         // ATST=ALWAYS/NEVER is independent of texture and vertex alpha: avoid a full redundant pass.
         // GOW-Port: also when the fragment alpha bounds (vertices; texture according to TFX and its texels' bounds)
@@ -2905,8 +3004,8 @@ struct GSHwBackend::Impl
         if (alphaAlways) ++stats.alphaAlwaysFast;
         if (alphaNever) ++stats.alphaNeverFast;
         if (ate && failIsNoop) ++stats.alphaNoopFail;
-        g.Uniform1i(locPass, (ate && !forceNoTest && !alphaAlways && !alphaNever) ? 1 : 0);
-        g.Uniform1i(locFailTint, 0);
+        setUniform1i(locPass, (ate && !forceNoTest && !alphaAlways && !alphaNever) ? 1 : 0);
+        setUniform1i(locFailTint, 0);
         static const int traceAt = std::getenv("GOW_GS_HW_DEPTHTRACE") ? std::atoi(std::getenv("GOW_GS_HW_DEPTHTRACE")) : -1;
         const bool tracing = traceAt >= 0 && presentCount >= traceAt && presentCount < traceAt + 1 && rt.depth && rt.fbp == 0;
         const auto depthStats = [&](const char *when)
@@ -2990,9 +3089,9 @@ struct GSHwBackend::Impl
             if (s.prim.tme) ++stats.alphaSecondPassTextured; else ++stats.alphaSecondPassUntextured;
             // failing fragments: 1 FB_ONLY (colour+alpha, no Z), 2 ZB_ONLY (Z only), 3 RGB_ONLY (colour, no alpha, no Z)
             if (!alphaNever)
-                g.Uniform1i(locPass, 2);
+                setUniform1i(locPass, 2);
             static const bool failTint = std::getenv("GOW_GS_HW_FAILTINT") != nullptr;
-            g.Uniform1i(locFailTint, (failTint && afail == 3u && s.prim.tme && c.frame.fbp == 0u) ? 1 : 0);
+            setUniform1i(locFailTint, (failTint && afail == 3u && s.prim.tme && c.frame.fbp == 0u) ? 1 : 0);
             if (afail == 1u) { g.DepthMask(kFalse); }
             else if (afail == 2u) { g.ColorMask(kFalse, kFalse, kFalse, kFalse); }
             else { g.DepthMask(kFalse); g.ColorMask(mr, mg, mb, kFalse); }
@@ -3121,6 +3220,10 @@ struct GSHwBackend::Impl
                          (unsigned long long)stats.alphaSecondPass, (unsigned long long)stats.alphaSecondPassTextured,
                          (unsigned long long)stats.alphaSecondPassUntextured,
                          (unsigned long long)stats.textureParamsSet, (unsigned long long)stats.textureParamsSaved, textures.size());
+        if (statsEnabled) // GOW-Port: draw() uniforms written and skipped as unchanged (UniformShadow)
+            std::fprintf(stderr, "[gs-hw] uniforms written=%llu skipped=%llu\n", (unsigned long long)uniformWrites,
+                         (unsigned long long)uniformSkips);
+        uniformWrites = uniformSkips = 0;
         if (statsEnabled)
         {
             // GOW-Port: fill (host Mpixels per window and per batch), vertices and split of ATE/ATST/AFAIL/AREF

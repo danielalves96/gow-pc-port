@@ -101,7 +101,7 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 |---|---|
 | `GOW_PERF_DIAG=1`, `GOW_PERF_FRAME_PC=<pc>` | `[gow-perf]` per-second split: EE, VU1, GS, upload, flip rate |
 | `GOW_DELTA_DIAG=1` | `[gow-speed]` game time vs wall time (see [`../PERFORMANCE.md`](../PERFORMANCE.md)) |
-| `GOW_FRAMES_HITCH_LOG=1` | `[gow-frames] stutter of N ms at t=...` for every game frame over 50 ms (alone, without the 5 s report) |
+| `GOW_FRAMES_HITCH_LOG=1` | `[gow-frames] stutter of N ms at t=...` for every game frame over 50 ms (alone, without the 5 s report), with what that frame spent: the `[gow-perf]` buckets of every thread (`ee`, `vu`, `gs`, `iop`, waits, `upload`; they need `GOW_PERF_DIAG=1`), the GS texture decodes with their upload (`tex_decodes`, `tex_ms`, `tex_ktexels`) and the new render targets |
 | `GOW_GAP_DIAG=<ms>` | `[gow-gap]` when two guest function entries are more than `<ms>` apart: the pc entered before the gap (where the time went) |
 | `GOW_LOG_DIRECT=1` | Write stdout/stderr straight to the files again. By default (0.3.0) they go through a pipe and a writer thread, because a direct write could stall the game for 50-100 ms |
 | `GOW_SAMPLING=1` | Periodic subsystem sampling (`ps2-dev perf-summary` parses it) |
