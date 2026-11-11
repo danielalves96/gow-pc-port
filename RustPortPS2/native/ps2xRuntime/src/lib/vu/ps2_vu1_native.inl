@@ -671,19 +671,32 @@ void VU1NativeAccess::codeChanged(VU1Interpreter::NativeState &ns, const uint8_t
     for (uint32_t i = 0; i < kPairs; ++i)
     {
         changedBefore[i] = static_cast<uint16_t>(changed);
-        changed += std::memcmp(ns.code + i * 8u, code + i * 8u, 8u) != 0;
+        uint64_t a, b;
+        std::memcpy(&a, ns.code + i * 8u, 8u);
+        std::memcpy(&b, code + i * 8u, 8u);
+        changed += a != b;
     }
     changedBefore[kPairs] = static_cast<uint16_t>(changed);
     if (changed == 0u)
         return;
+    // GOW-Port: a slot's scan covers at most 65 pairs (64 + the pair that ends it), so only the slots up to 64 pairs before a
+    // changed pair can see it: those are the only ones tested (the 2048 slots are 256 KB; the game swaps one microprogram
+    // ~13 times per frame and walking them all each time was most of this function).
+    uint32_t next = 0; // first slot not tested yet
     for (uint32_t i = 0; i < kPairs; ++i)
     {
-        NS::Slot &sl = ns.slots[i];
-        if (!sl.known)
-            continue;
-        const uint32_t end = std::min<uint32_t>(kPairs, i + sl.pairs + 1u); // the pair after the block ends the scan
-        if (changedBefore[end] != changedBefore[i])
-            sl.known = false;
+        if (changedBefore[i + 1u] == changedBefore[i])
+            continue; // pair i did not change
+        for (uint32_t j = std::max(next, i >= 64u ? i - 64u : 0u); j <= i; ++j)
+        {
+            NS::Slot &sl = ns.slots[j];
+            if (!sl.known)
+                continue;
+            const uint32_t end = std::min<uint32_t>(kPairs, j + sl.pairs + 1u); // the pair after the block ends the scan
+            if (changedBefore[end] != changedBefore[j])
+                sl.known = false;
+        }
+        next = i + 1u;
     }
     std::memcpy(ns.code, code, sizeof(ns.code));
 }
@@ -866,7 +879,41 @@ bool VU1Interpreter::runNative(StepContext &context)
         const uint32_t result = fn(ctx);
         VU1NativeAccess::finishBlockTiming(*this, sl, cyc, cycId, start);
         if (m_cycle >= m_nextCommitCycle)
-            commitReadyPipelines(); // FDIV/EFU entries kept for timing retire when ready (values are written already)
+        {
+            // FDIV/EFU entries kept for timing retire when ready (values are written already). GOW-Port: inside the native
+            // loop nothing else is pending (callouts commit their values, their flags join the rings), so the FDIV/EFU
+            // part of commitReadyPipelines runs here inline: same results, without the call and its empty queue walks.
+            if (((m_storePending | m_vfPending | m_viPending | m_accPending) | m_flagCount) != 0u)
+                commitReadyPipelines();
+            else
+            {
+                uint64_t next = ~0ull;
+                if (m_fdiv.valid)
+                {
+                    if (m_fdiv.readyCycle <= m_cycle)
+                    {
+                        m_state.q = m_fdiv.value;
+                        const uint32_t currentDi = m_fdiv.statusDi & 0x30u;
+                        m_state.status = (m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
+                        m_fdiv.valid = false;
+                    }
+                    else
+                        next = m_fdiv.readyCycle;
+                }
+                for (ScalarPipelineEntry &e : m_efu)
+                    if (e.valid)
+                    {
+                        if (e.readyCycle <= m_cycle)
+                        {
+                            m_state.p = e.value;
+                            e.valid = false;
+                        }
+                        else
+                            next = std::min(next, e.readyCycle);
+                    }
+                m_nextCommitCycle = next;
+            }
+        }
         ns.nativePairs += sl.pairs;
         ++ns.nativeBlocks;
         m_state.pc = result & 0x3FFFu;
