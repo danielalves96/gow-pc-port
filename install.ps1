@@ -62,12 +62,13 @@ param(
     # Studio: issues #9, #14, #19, #21, #23). msvc: Visual Studio Build Tools, as before.
     [ValidateSet('clang', 'msvc')]
     [string]$Compiler = 'clang',
-    # GOW-Port: profile-guided optimization (clang only), trained here on this PC in the optimization run, never downloaded.
-    # auto (default): the installation and "Recompilar agora" build once and use a profile only if one is already there, so the
-    # player can play after a single build. on: also trains one when there is none (the launcher's "Optimize now", run with the
-    # game closed: build with instrumentation, the optimization run, build with the profile; the same run gives the native IOP
-    # modules). off: never. -RetrainPgo trains again although a profile exists (an existing one is reused after an update:
-    # functions that changed are just compiled without profile data).
+    # GOW-Port: profile-guided optimization (clang only). auto (default): the installation and "Recompilar agora" build once,
+    # with the profile this PC trained if there is one, else with the runtime-only profile shipped in the repository
+    # (RustPortPS2/native/pgo/runtime.profdata: our own runtime, nothing from the game), so the game never opens by itself
+    # during an installation and the player can play after a single build. on: also trains the full profile when there is none
+    # (the launcher's "Optimize now", run with the game closed: build with instrumentation, the optimization run, build with the
+    # profile; the same run gives the native IOP modules). off: none at all. -RetrainPgo trains again although a profile exists
+    # (an existing one is reused after an update: functions that changed are just compiled without profile data).
     [ValidateSet('auto', 'on', 'off')]
     [string]$Pgo = 'auto',
     [switch]$RetrainPgo
@@ -695,7 +696,8 @@ function Configure {
             Remove-Item -LiteralPath (Join-Path $Build 'gow-configure.sig') -Force -ErrorAction SilentlyContinue
         }
     }
-    # GOW-Port: PGO mode of this build ($script:PgoMode: generate, use or empty), see the end of this script.
+    # GOW-Port: PGO mode of this build ($script:PgoMode: generate, use (the profile trained here), shipped (the runtime-only
+    # profile of the repository) or empty), see the end of this script.
     $pgoSignature = ''
     if ($script:PgoMode -eq 'generate') { $extra += '-DPS2X_PGO=generate' }
     elseif ($script:PgoMode -eq 'use') {
@@ -703,7 +705,11 @@ function Configure {
         $extra += "-DPS2X_PGO_PROFILE=$(Slashes $PgoProfile)"
         $pgoSignature = (Get-FileHash -LiteralPath $PgoProfile -Algorithm SHA256).Hash
     }
-    else { $extra += '-DPS2X_PGO=' }
+    elseif ($script:PgoMode -eq 'shipped') {
+        $extra += '-DPS2X_PGO=shipped'
+        $pgoSignature = 'shipped-' + (Get-FileHash -LiteralPath $ShippedProfile -Algorithm SHA256).Hash
+    }
+    else { $extra += '-DPS2X_PGO=off' }
     # GOW-Port: Release and RelWithDebInfo both build with /O2 and no whole-program optimization (PS2X_ENABLE_LTCG, off by default).
     $buildType = if ($FastDev) { 'RelWithDebInfo' } else { 'Release' }
     $runtimeLogs = if ($FastDev) { 'ON' } else { 'OFF' }
@@ -765,16 +771,24 @@ function Configure {
         }
     }
 }
-# GOW-Port: PGO (decision D3: trained on this PC, never shipped). The profile stays in the build folder, like the generated code.
+# GOW-Port: PGO. Two profiles: the full one trained on this PC from this game (the optional "Optimize now" / -Pgo on; it stays
+# in the build folder, like the generated code, and wins when present) and the runtime-only one shipped in the repository
+# (built from our own runtime, holds nothing from the game; the default, so an installation never opens the game by itself).
 $PgoDir = Join-Path $Build 'pgo'
 $PgoProfile = Join-Path $PgoDir 'gow.profdata'
+$ShippedProfile = Join-Path $Native 'pgo\runtime.profdata'
 $pgoPossible = ($Compiler -eq 'clang') -and -not $FastDev -and $Pgo -ne 'off'
 $hasProfile = Test-Path -LiteralPath $PgoProfile
+$hasShipped = Test-Path -LiteralPath $ShippedProfile
 $trainPgo = $pgoPossible -and (($Pgo -eq 'on' -and -not $hasProfile) -or $RetrainPgo)
-$usePgo = $pgoPossible -and ($trainPgo -or $hasProfile)
-$script:PgoMode = if ($trainPgo) { 'generate' } elseif ($usePgo) { 'use' } else { '' }
+$script:PgoMode = if ($trainPgo) { 'generate' } elseif ($pgoPossible -and $hasProfile) { 'use' } elseif ($pgoPossible -and $hasShipped) { 'shipped' } else { '' }
 if ($Compiler -eq 'clang') {
-    $pgoState = if ($trainPgo) { 'trained in the optimization run' } elseif ($usePgo) { "the existing profile ($PgoProfile)" } else { "not trained yet ($(if ($Pgo -eq 'off') { '-Pgo off' } elseif ($FastDev) { '-FastDev' } else { 'the launcher''s Optimize now trains it; -Pgo on here' }))" }
+    $pgoState = switch ($script:PgoMode) {
+        'generate' { 'training the full profile in the optimization run' }
+        'use' { "the profile trained on this PC ($PgoProfile)" }
+        'shipped' { "the runtime-only profile of the repository ($ShippedProfile); the launcher's Optimize now trains a full one" }
+        default { "none ($(if ($Pgo -eq 'off') { '-Pgo off' } elseif ($FastDev) { '-FastDev' } else { 'no profile in the repository' }))" }
+    }
     Write-Host "Speed profile (PGO): $pgoState"
 }
 Step 'Configuring the build (the first time it downloads raylib, imgui and rlImGui)'
@@ -885,8 +899,8 @@ if ($trainPgo) {
         $script:PgoMode = 'use'
     }
     else {
-        Warn 'The optimization run wrote no speed profile (did the game close early?): the game is built without PGO this time.'
-        $script:PgoMode = ''
+        Warn 'The optimization run wrote no speed profile (did the game close early?): the game is built with the profile of the repository instead.'
+        $script:PgoMode = if ($hasShipped) { 'shipped' } else { '' }
     }
     Configure
     BuildGame $(if ($script:PgoMode -eq 'use') { ' with the speed profile' } else { '' })

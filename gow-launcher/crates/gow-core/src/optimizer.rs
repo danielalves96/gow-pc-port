@@ -47,7 +47,8 @@ pub struct OptimizerSnapshot {
     pub status: OptimizerStatus,
     /// The run in progress is the speed-profile optimization ("Optimize now": the game opens by itself, see [`Optimizer::profile_now`]).
     pub profiling: bool,
-    /// The installation has a speed profile (PGO), so its builds use it.
+    /// The installation has the full speed profile trained on this PC ("Optimize now"), so its builds use it. Every clang
+    /// build already uses the runtime-only profile shipped with the kit; this one comes on top and replaces it.
     pub profile_ready: bool,
     /// This installation can have one: Windows, built with clang.
     pub profile_supported: bool,
@@ -92,7 +93,9 @@ pub fn profile_stage_after(current: ProfileStage, line: &str) -> ProfileStage {
     }
 }
 
-/// GOW-Port: the speed profile (clang PGO) of an installation, trained on this PC by install.ps1 -Pgo on and never shipped.
+/// GOW-Port: the full speed profile (clang PGO) of an installation, trained on this PC by install.ps1 -Pgo on and never
+/// shipped. Without it the builds use the runtime-only profile of the kit (`RustPortPS2/native/pgo/runtime.profdata`, which
+/// holds nothing from the game); with it they use this one instead.
 pub fn profile_path(destination: &Path) -> PathBuf {
     destination.join("build").join("pgo").join("gow.profdata")
 }

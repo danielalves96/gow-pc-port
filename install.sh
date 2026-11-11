@@ -9,9 +9,11 @@
 #                    wizard uses it; the generated C++ still lands inside RustPortPS2/native.
 #   --jobs N         build processes (default: cores minus a reserve of 2, 1 or 0, at most one per 2 GB of RAM).
 #   --compiler       C++ compiler: g++ (default) or clang (clang++). Also settable via CXX=clang++ or GOW_COMPILER=clang.
-#   --pgo auto|on|off  speed profile (clang only): auto (default: use an existing profile if present), on (train it in the
-#                    optimization run and rebuild with it), or off. Also settable via GOW_PGO=auto|on|off.
-#   --retrain-pgo    train the speed profile again even when build/pgo/gow.profdata already exists.
+#   --pgo auto|on|off  speed profile (clang only; g++ ignores it): auto (default: the profile trained on this PC if present, else
+#                    the runtime-only profile shipped in RustPortPS2/native/pgo/, which holds nothing from the game, so the
+#                    installation never opens the game by itself), on (also train the full profile in the optimization run
+#                    and rebuild with it), or off (none). Also settable via GOW_PGO=auto|on|off.
+#   --retrain-pgo    train the full speed profile again even when build/pgo/gow.profdata already exists.
 #   --vu1-memory-limit-gb N  RAM budget for the VU1 AOT generator in GB (default: 4, 0 = unlimited; same as install.ps1).
 #   --normal-priority  do not lower the CPU and I/O priority of the long steps (nice, ionice); by default they run lowered so the
 #                    PC stays usable while the game builds.
@@ -426,8 +428,10 @@ configure() {
         extra+=("-DPS2X_PGO=generate")
     elif [ "${PGO_MODE:-}" = "use" ]; then
         extra+=("-DPS2X_PGO=use" "-DPS2X_PGO_PROFILE=$PGO_PROFILE")
+    elif [ "${PGO_MODE:-}" = "shipped" ]; then
+        extra+=("-DPS2X_PGO=shipped")
     else
-        extra+=("-DPS2X_PGO=")
+        extra+=("-DPS2X_PGO=off")
     fi
     if compgen -G "$VU1/*.bin" >/dev/null; then
         extra+=("-DPS2X_VU1_MICROCODE_DIR=$VU1" "-DPS2X_VU1_GENERATOR_SOURCE=$NATIVE/tools/vu1/generate_vu1.cpp"
@@ -452,9 +456,12 @@ configure() {
         "${extra[@]}" >/dev/null
 }
 
-# GOW-Port: PGO (decision D3: trained on this PC, never shipped). The profile stays in the build folder, like the generated code.
+# GOW-Port: PGO. Two profiles: the full one trained on this PC from this game (the optional --pgo on; it stays in the build
+# folder, like the generated code, and wins when present) and the runtime-only one shipped in the repository (built from our
+# own runtime, holds nothing from the game; the default, so an installation never opens the game by itself).
 PGO_DIR="$BUILD/pgo"
 PGO_PROFILE="$PGO_DIR/gow.profdata"
+PGO_SHIPPED="$NATIVE/pgo/runtime.profdata"
 PGO_POSSIBLE=0
 [ "$COMPILER_CHECK" = "clang++" ] && [ "$PGO" != "off" ] && PGO_POSSIBLE=1
 HAS_PGO_PROFILE=0
@@ -463,27 +470,22 @@ TRAIN_PGO=0
 if [ "$PGO_POSSIBLE" = 1 ] && { { [ "$PGO" = "on" ] && [ "$HAS_PGO_PROFILE" = 0 ]; } || [ "$RETRAIN_PGO" = 1 ]; }; then
     TRAIN_PGO=1
 fi
-USE_PGO=0
-if [ "$PGO_POSSIBLE" = 1 ] && { [ "$TRAIN_PGO" = 1 ] || [ "$HAS_PGO_PROFILE" = 1 ]; }; then
-    USE_PGO=1
-fi
 if [ "$TRAIN_PGO" = 1 ]; then
     PGO_MODE="generate"
-elif [ "$USE_PGO" = 1 ]; then
+elif [ "$PGO_POSSIBLE" = 1 ] && [ "$HAS_PGO_PROFILE" = 1 ]; then
     PGO_MODE="use"
+elif [ "$PGO_POSSIBLE" = 1 ] && [ -f "$PGO_SHIPPED" ]; then
+    PGO_MODE="shipped"
 else
     PGO_MODE=""
 fi
 if [ "$COMPILER_CHECK" = "clang++" ]; then
-    if [ "$TRAIN_PGO" = 1 ]; then
-        echo "Speed profile (PGO): trained in the optimization run"
-    elif [ "$USE_PGO" = 1 ]; then
-        echo "Speed profile (PGO): the existing profile ($PGO_PROFILE)"
-    elif [ "$PGO" = "off" ]; then
-        echo "Speed profile (PGO): not trained yet (--pgo off)"
-    else
-        echo "Speed profile (PGO): not trained yet (pass --pgo on to train it)"
-    fi
+    case "$PGO_MODE" in
+        generate) echo "Speed profile (PGO): training the full profile in the optimization run" ;;
+        use) echo "Speed profile (PGO): the profile trained on this PC ($PGO_PROFILE)" ;;
+        shipped) echo "Speed profile (PGO): the runtime-only profile of the repository ($PGO_SHIPPED); --pgo on trains a full one" ;;
+        *) echo "Speed profile (PGO): none ($([ "$PGO" = "off" ] && echo "--pgo off" || echo "no profile in the repository"))" ;;
+    esac
 fi
 
 step "Configuring the build (the first time it downloads raylib, imgui and rlImGui)"
@@ -545,8 +547,8 @@ if [ "$TRAIN_PGO" = 1 ]; then
         rm -f "$PGO_DIR"/*.profraw
         PGO_MODE="use"
     else
-        warn "The optimization run wrote no speed profile (did the game close early?): the game is built without PGO this time."
-        PGO_MODE=""
+        warn "The optimization run wrote no speed profile (did the game close early?): the game is built with the profile of the repository instead."
+        if [ -f "$PGO_SHIPPED" ]; then PGO_MODE="shipped"; else PGO_MODE=""; fi
     fi
     configure
     build_game

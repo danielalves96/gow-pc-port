@@ -111,7 +111,7 @@ describe('speed profile offer', () => {
     render(<App />);
     const user = userEvent.setup();
     const start = vi.spyOn(api, 'profileStart');
-    expect(await screen.findByText('Optimization available: more FPS')).toBeInTheDocument();
+    expect(await screen.findByText('Extra optimization available')).toBeInTheDocument();
     const base = {
       configured: true, compiling: false, captured: 1, compiled: 1, completionRatio: 1, buildProgress: -1, status: 'idle' as const,
       profiling: false, profileReady: false, profileSupported: true, profileStage: 'none' as const, instrumented: false, activity: idleActivity,
@@ -126,10 +126,10 @@ describe('speed profile offer', () => {
     expect(within(dialog).getByText(/Do not touch the keyboard, mouse or controller/)).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Start optimization' }));
     expect(start).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(screen.queryByText('Optimization available: more FPS')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('Extra optimization available')).not.toBeInTheDocument());
     act(() => api.emit('optimizer', { ...base, profiling: false }));
     await user.click(await screen.findByRole('button', { name: 'Later' }));
-    expect(screen.queryByText('Optimization available: more FPS')).not.toBeInTheDocument();
+    expect(screen.queryByText('Extra optimization available')).not.toBeInTheDocument();
     expect(window.localStorage.getItem('gow.profileOfferDismissed')).toBe('1');
     window.localStorage.removeItem('gow.profileOfferDismissed');
   });
@@ -266,7 +266,7 @@ describe('a training build left behind', () => {
     expect(await screen.findByText('Slow test version installed: PLAY locked')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'FINISHING' })).toBeDisabled();
     // The offer of "Optimize now" does not compete with it.
-    expect(screen.queryByText('Optimization available: more FPS')).not.toBeInTheDocument();
+    expect(screen.queryByText('Extra optimization available')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Rebuild now' }));
     expect(rebuild).toHaveBeenCalledTimes(1);
   });
