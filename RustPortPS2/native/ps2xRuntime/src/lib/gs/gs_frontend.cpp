@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -986,7 +987,11 @@ void GS::stageMarker(const uint8_t *data, uint32_t sizeBytes)
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId path)
 {
-    ps2_perf::Scope perf(ps2_perf::Bucket::Gs); // GOW-Port: includes rasterization and GIF transfers.
+    // GOW-Port: includes rasterization and GIF transfers. The stage thread already runs inside a Gs scope for its whole
+    // batch (gs_stage.cpp): a nested scope of the same bucket accounts exactly the same, but cost two clock reads per packet.
+    std::optional<ps2_perf::Scope> perf;
+    if (ps2_perf::enabled() && ps2_perf::accounting.active != ps2_perf::Bucket::Gs)
+        perf.emplace(ps2_perf::Bucket::Gs);
     std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (path == static_cast<GifPathId>(0))
     {

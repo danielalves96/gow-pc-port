@@ -1,4 +1,5 @@
 #include "runtime/gs/gs_stage.h"
+#include "runtime/ps2_perf.h"
 
 #include <atomic>
 #include <chrono>
@@ -350,6 +351,10 @@ namespace
                 st.common.diag.idleUs += busySince - idleSince;
             }
             // A batch: every record complete when it was taken. readPos moves after each one, freeing its room.
+            // GOW-Port: GOW_PERF_DIAG accounts the whole batch to the Gs bucket once; GS::processGIFPacket no longer
+            // reads the clock twice per packet inside it.
+            {
+            ps2_perf::Scope batchPerf(ps2_perf::Bucket::Gs);
             while (read != write)
             {
                 uint8_t *at = s.ring.get() + (read % kRingBytes);
@@ -371,6 +376,7 @@ namespace
                 read += length;
                 s.readPos.store(read, std::memory_order_seq_cst);
                 ringReleased(s);
+            }
             }
             if (st.common.afterBatch)
                 st.common.afterBatch();
