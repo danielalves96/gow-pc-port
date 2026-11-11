@@ -19,6 +19,41 @@ namespace
         static std::unordered_map<uint64_t, NativeEntry> registry;
         return registry;
     }
+    // GOW-Port: vu1n::blockKey is a byte-wise FNV-1a, a serial chain of 4 multiplications per word (up to 128 words, ~2000
+    // cycles) that every slot setup paid. The game swaps microprograms back and forth, so the same pair sequences come again:
+    // remember the registry key of the sequences seen, found by a fast 64-bit hash and confirmed by comparing all the words
+    // (a collision only replaces the entry), so the key is always the one blockKey would compute.
+    uint64_t cachedBlockKey(const uint32_t *words, uint32_t count)
+    {
+        struct Entry
+        {
+            uint32_t count;
+            uint64_t key;
+            uint32_t words[136]; // 65 pairs at most (64 + a delay slot)
+        };
+        static thread_local std::unordered_map<uint64_t, Entry> cache;
+        uint64_t h = 0x9E3779B97F4A7C15ull ^ count;
+        for (uint32_t i = 0; i + 1u < count; i += 2u)
+        {
+            uint64_t v;
+            std::memcpy(&v, words + i, 8);
+            h = (h ^ v) * 0xFF51AFD7ED558CCDull;
+            h ^= h >> 32;
+        }
+        if (count & 1u)
+            h = (h ^ words[count - 1u]) * 0xFF51AFD7ED558CCDull, h ^= h >> 32;
+        const auto it = cache.find(h);
+        if (it != cache.end() && it->second.count == count && std::memcmp(it->second.words, words, count * 4u) == 0)
+            return it->second.key;
+        const uint64_t key = vu1n::blockKey(words, count);
+        if (cache.size() >= 16384u)
+            cache.clear();
+        Entry &e = cache[h];
+        e.count = count;
+        e.key = key;
+        std::memcpy(e.words, words, count * 4u);
+        return key;
+    }
     bool isBranchLower(uint32_t lower)
     {
         switch (lower >> 25)
@@ -717,7 +752,7 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu, 
         sl.pairs = static_cast<uint16_t>(count);
         if (count != 0u)
         {
-            const auto it = nativeRegistry().find(vu1n::blockKey(words, count * 2u));
+            const auto it = nativeRegistry().find(cachedBlockKey(words, count * 2u));
             if (it != nativeRegistry().end())
             {
                 if (it->second.cyc.empty())
