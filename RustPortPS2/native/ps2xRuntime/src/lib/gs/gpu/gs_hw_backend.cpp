@@ -682,7 +682,8 @@ struct GSHwBackend::Impl
     int shuffleWhy = 0; // debug: which tryShuffle check rejected the last sprite
     RenderTarget *shuffleDst = nullptr, *shuffleSrc = nullptr;
     bool shuffleSrcZ = false;
-    std::unordered_map<uint32_t, std::vector<uint16_t>> ownerInverse; // psm -> in-page word index -> y * 64 + x
+    // GOW-Port: flat (GSSwizzle::GetFormat masks psm with 0x3F, so does this index); was an unordered_map looked up per pixel
+    std::array<std::vector<uint16_t>, 64> ownerInverse; // psm -> in-page word index -> y * 64 + x
     std::unordered_map<const uint16_t *, uint32_t> tableOffset;
     std::unordered_map<uint32_t, uint32_t> inverseOffset; // psm -> offset of the inverse page table
     std::vector<HwVertex> pending;
@@ -1938,7 +1939,7 @@ struct GSHwBackend::Impl
     // ---- channel shuffles (see kShuffleFs) -------------------------------------------------------------------------
     const std::vector<uint16_t> &inverseFor(uint32_t ownerPsm)
     {
-        std::vector<uint16_t> &inv = ownerInverse[ownerPsm];
+        std::vector<uint16_t> &inv = ownerInverse[ownerPsm & 0x3Fu];
         if (inv.empty())
         {
             const GSSwizzle::Format &f = GSSwizzle::GetFormat(ownerPsm);
