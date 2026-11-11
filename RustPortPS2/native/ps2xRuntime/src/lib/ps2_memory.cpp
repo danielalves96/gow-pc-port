@@ -2375,13 +2375,15 @@ void PS2Memory::waitGsWorkerIdle(const char *site, uint32_t address)
 {
     std::unique_lock<std::mutex> lock(m_gsWorkerMutex);
     const bool busy = !m_gsWorkerJobs.empty() || m_gsWorkerBusy;
-    const auto start = std::chrono::steady_clock::now();
+    // GOW-Port: the clock reads only feed PS2X_GS_WORKER_DIAG; this runs at every GS register sync from the EE.
+    const bool diagOn = gsWorkerSyncDiagEnabled();
+    const auto start = diagOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (busy)
         m_gsWorkerIdleCv.wait(lock, [this] { return m_gsWorkerJobs.empty() && !m_gsWorkerBusy; });
     lock.unlock();
-    const auto workerDone = std::chrono::steady_clock::now();
+    const auto workerDone = diagOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const bool stageWaited = ps2_gs_stage::waitIdle(); // GOW-Port: the GS frontend stage is part of the worker (gs_stage.h)
-    if (!gsWorkerSyncDiagEnabled())
+    if (!diagOn)
         return;
     static GsWorkerSyncDiag diag;
     const auto now = std::chrono::steady_clock::now();
