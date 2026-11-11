@@ -281,22 +281,25 @@ void VU1Interpreter::normalizeFmacResult(float *result, uint8_t dest,
 
     const uint8_t fs = FS(upper);
     const uint8_t ft = FT(upper);
-    long double vs[4];
-    long double vt[4];
-    long double acc[4];
+    // GOW-Port: the operands stay floats (normalizeOperand only moves bits) and widen to long double only where the exact
+    // computation needs them; before, 12 x87 conversions per instruction ran even when every lane took a fast path below.
+    // static_cast<long double>(f) is exact and static_cast<float>(that) gives f back, so the products and sums are the same.
+    float vsF[4];
+    float vtF[4];
+    float accF[4];
     for (uint32_t component = 0; component < 4u; ++component)
     {
-        vs[component] = static_cast<long double>(normalizeOperand(m_state.vf[fs][component]));
-        vt[component] = static_cast<long double>(normalizeOperand(m_state.vf[ft][component]));
-        acc[component] = static_cast<long double>(normalizeOperand(m_state.acc[component]));
+        vsF[component] = normalizeOperand(m_state.vf[fs][component]);
+        vtF[component] = normalizeOperand(m_state.vf[ft][component]);
+        accF[component] = normalizeOperand(m_state.acc[component]);
     }
-    long double scalar = 0.0L;
+    float scalarF = 0.0f;
     if (source == Source::Q)
-        scalar = static_cast<long double>(normalizeOperand(m_state.q));
+        scalarF = normalizeOperand(m_state.q);
     else if (source == Source::I)
-        scalar = static_cast<long double>(normalizeOperand(m_state.i));
+        scalarF = normalizeOperand(m_state.i);
     else if (source == Source::Broadcast)
-        scalar = vt[code & 3u];
+        scalarF = vtF[code & 3u];
 
     static constexpr uint8_t crossLeft[4] = {1u, 2u, 0u, 3u};
     static constexpr uint8_t crossRight[4] = {2u, 0u, 1u, 3u};
@@ -319,32 +322,39 @@ void VU1Interpreter::normalizeFmacResult(float *result, uint8_t dest,
                 continue;
             }
         }
-        const long double right = source == Source::Vector ? vt[component] : scalar;
+        const float rightF = source == Source::Vector ? vtF[component] : scalarF;
         if (kind == Kind::Madd || kind == Kind::Msub)
         {
-            const float product = static_cast<float>(vs[component]) * static_cast<float>(right);
+            const float product = vsF[component] * rightF;
             if (productSumFlagsFast(result[component], product, laneFlags[component]))
                 continue;
         }
         else if (kind == Kind::Opmsub && component != 3u)
         {
-            const float product = static_cast<float>(vs[crossLeft[component]]) * static_cast<float>(vt[crossRight[component]]);
+            const float product = vsF[crossLeft[component]] * vtF[crossRight[component]];
             if (productSumFlagsFast(result[component], product, laneFlags[component]))
                 continue;
         }
+        const long double vsL = static_cast<long double>(vsF[component]);
+        const long double right = static_cast<long double>(rightF);
         long double exact = 0.0L;
         switch (kind)
         {
-        case Kind::Add: exact = vs[component] + right; break;
-        case Kind::Sub: exact = vs[component] - right; break;
-        case Kind::Madd: exact = acc[component] + vs[component] * right; break;
-        case Kind::Msub: exact = acc[component] - vs[component] * right; break;
-        case Kind::Mul: exact = vs[component] * right; break;
+        case Kind::Add: exact = vsL + right; break;
+        case Kind::Sub: exact = vsL - right; break;
+        case Kind::Madd: exact = static_cast<long double>(accF[component]) + vsL * right; break;
+        case Kind::Msub: exact = static_cast<long double>(accF[component]) - vsL * right; break;
+        case Kind::Mul: exact = vsL * right; break;
         case Kind::Opmsub:
-            exact = component == 3u ? 0.0L : acc[component] - vs[crossLeft[component]] * vt[crossRight[component]];
+            exact = component == 3u ? 0.0L
+                                    : static_cast<long double>(accF[component]) -
+                                          static_cast<long double>(vsF[crossLeft[component]]) *
+                                              static_cast<long double>(vtF[crossRight[component]]);
             break;
         case Kind::Opmula:
-            exact = component == 3u ? 0.0L : vs[crossLeft[component]] * vt[crossRight[component]];
+            exact = component == 3u ? 0.0L
+                                    : static_cast<long double>(vsF[crossLeft[component]]) *
+                                          static_cast<long double>(vtF[crossRight[component]]);
             break;
         default: break;
         }
