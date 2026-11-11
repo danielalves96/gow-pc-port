@@ -140,8 +140,8 @@ install.cmd -Destination "D:\GodOfWar"               # keep the game data and th
 | `-Iso <file>` | The disc image (`.iso`, or a `.chd`: converted to a temporary ISO that is deleted after the extraction). Without it, the first `.iso` (then `.chd`) in `game\` and then in the repository root is used |
 | `-Destination <folder>` | Where `game\`, `build\`, `build-gen\` and `vu1_captures\` go. The generated C++ still lands in the repository |
 | `-Compiler clang\|msvc` | `clang` (default since 0.3.0): the portable llvm-mingw, downloaded into the install folder; no Visual Studio is needed when prebuilt `ps2_recomp` / `ps2-tools` are available (the launcher's kit, or `-RecompExe` / `-ToolsExe`), otherwise Visual Studio's linker builds them with cargo. `msvc`: the Visual Studio compiler, as before 0.3.0 |
-| `-Pgo auto\|on\|off` | Speed profile (clang only). `auto` (default): use the profile this PC already trained, if any. `on`: train it when missing (the game opens by itself for the optimization run, then a second build uses it). `off`: never. The profile is made on your PC from your game and is never distributed |
-| `-RetrainPgo` | Train the speed profile again even when one exists |
+| `-Pgo auto\|on\|off` | Speed profile (clang only). `auto` (default): build with the profile this PC already trained, if any, else with the runtime-only profile that ships in the repository (`RustPortPS2/native/pgo/runtime.profdata`, made from our own runtime, nothing from the game: the installation never opens the game by itself). `on`: also train the full profile when there is none (the game opens by itself for the optimization run, then a second build uses it; about 20 % less VU1 and EE time per frame on top of the shipped profile). `off`: no profile. The trained profile is made on your PC from your game and is never distributed |
+| `-RetrainPgo` | Train the full speed profile again even when one exists |
 | `-InstallTools` | Downloads Microsoft's Build Tools installer (signature checked) and installs the C++ workload, when Visual Studio is missing and needed (`-Compiler msvc`, or the Rust tools must be built). A missing or unusable CMake or Ninja is not a reason: portable ones are downloaded first |
 | `-NoOptimize` / `-Optimize` | Skip / force the optimization pass (see below) |
 | `-Seconds <n>` | Duration of the optimization run (default 240 s) |
@@ -199,8 +199,8 @@ install.cmd -Destination "D:\GodOfWar"               # keep the game data and th
 | `--optimize [seconds]` | Force it, optionally for a different duration (default 240 s) |
 | `--jobs N` | Parallel compiler processes. Default: the cores minus a reserve (2 from 8 cores, 1 from 4 to 7, none below), at most one per 2 GB of RAM. An explicit value skips the reserve |
 | `--compiler g++\|clang` | C++ compiler (`g++` by default; `clang` uses `clang`/`clang++`, also selectable via `CXX=clang++` or `GOW_COMPILER=clang`) |
-| `--pgo auto\|on\|off` | Speed profile (`clang` only, requires `llvm-profdata` from the `llvm` package when training). `auto` (default): use `build/pgo/gow.profdata` if already present. `on`: train it during the optimization run and rebuild with it. `off`: disable PGO |
-| `--retrain-pgo` | Train the speed profile again even when `build/pgo/gow.profdata` already exists |
+| `--pgo auto\|on\|off` | Speed profile (`clang` only, requires `llvm-profdata` from the `llvm` package when training; `g++` ignores it). `auto` (default): use `build/pgo/gow.profdata` if already present, else the runtime-only profile shipped in `RustPortPS2/native/pgo/runtime.profdata` (nothing from the game, no training run). `on`: also train the full profile during the optimization run and rebuild with it. `off`: disable PGO |
+| `--retrain-pgo` | Train the full speed profile again even when `build/pgo/gow.profdata` already exists |
 | `--vu1-memory-limit-gb N` | RAM cap for the VU1 generator in GB (default 4, `0` = unlimited) |
 | `--normal-priority` | Do not lower the CPU and I/O priority of the long steps (by default they run under `nice -n 10`, and `ionice -c 3` when it works) |
 | `--recomp-exe FILE` | Use a prebuilt `ps2_recomp` |

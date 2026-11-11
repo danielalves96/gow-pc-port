@@ -191,6 +191,9 @@ fluido, só mais quente.
 - O lado da CPU é dominado pela **VU1** (unidade vetorial). Cada passe de otimização converte mais dela em código nativo:
   rode `install.cmd -Optimize` / `./install.sh --optimize` depois de jogar áreas novas, ou deixe a otimização em segundo
   plano do launcher terminar.
+- As builds com clang (o padrão no Windows) já usam um perfil de velocidade (PGO) que vem no repositório e não contém nada
+  do jogo. O **Otimizar agora** do launcher (`-Pgo on` / `--pgo on`) é um extra opcional que treina um perfil completo no seu
+  PC e, nos testes, reduziu em cerca de 20 % a mais o tempo de VU1 e EE por quadro (ele abre o jogo sozinho por 4 minutos).
 - **O perfil de economia de energia do notebook pode cortar a taxa pela metade**, porque reduz o clock da CPU de que a
   thread da VU1 precisa.
 

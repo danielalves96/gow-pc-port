@@ -62,6 +62,34 @@ To do:
 Deliverable: the measured table, the decision, and if it is removal, the change to `install.ps1`, `install.sh`,
 `gow-core` (optimizer and its UI strings, both languages), `README.md` / `README.pt-BR.md` (in sync) and `docs/`.
 
+### Item 6 results (2026-11-11) and decision: keep PGO, ship a runtime-only profile
+
+Final build, launcher environment, 60 FPS, opening scene, 3 alternating pairs of 150 s (the runtime-only profile: 2 pairs),
+per-thread time per frame:
+
+| Build | Cores | VU1 ms/frame | EE ms/frame | GS ms/frame |
+|---|---|---|---|---|
+| no PGO | 4 | 7.96 | 5.07 | 6.69 |
+| full profile trained on the PC (`install.ps1 -Pgo on`) | 4 | 6.16 (-23 %) | 4.03 (-20 %) | 4.26 (-36 %) |
+| no PGO | 4 | - | - | 6.37 |
+| runtime-only profile (shipped) | 4 | about -2 % | about 0 | 4.85 (-24 %) |
+| full profile vs no PGO | 2 | within noise: the game cannot hold 60 FPS there either way | | |
+
+Every PGO run of the full profile beat every non-PGO run. The runtime-only profile is the full one with the recompiled EE
+functions, the generated VU1 blocks and compiled programs, and the templates instantiated with microcode words removed
+(`llvm-profdata merge --no-function='sub_[0-9A-F]{8}|entry_[0-9A-Fa-f]+|vu1n_part|vu1c_gen|IL[jmiy][0-9]{3,}E'`: 13,398 of
+162,811 functions kept, 2.3 MB). Its gain is the GS; the VU1 and EE gain needs the training on the player's PC.
+
+Decision: PGO stays (well above the 5 % threshold), and the installation never needs the game to open by itself:
+
+- by default (clang) the build uses `RustPortPS2/native/pgo/runtime.profdata`, shipped in the repository (holds nothing from the
+  game: names audited, no value-profile data, see `docs/dev/BUILD.md`);
+- the full training stays as the optional **Optimize now** / `-Pgo on` / `--pgo on`; the locally trained profile then wins
+  over the shipped one;
+- `scripts/make-runtime-profile.ps1` turns a freshly trained full profile into the shipped one and audits it; refresh it after
+  runtime changes and before a release (functions that changed since simply lose their profile, the build stays quiet);
+- MSVC and GCC builds are unaffected.
+
 ## Item 7: the VU1
 
 What exists: VU1 microprograms are compiled ahead of time from the captures (`PS2X_VU1_MICROCODE_DIR`,

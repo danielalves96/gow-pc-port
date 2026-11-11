@@ -186,6 +186,9 @@ the monitor's rate, at most 120. Nothing runs above 120 FPS: past it a weak PC g
 - The CPU side is dominated by the **VU1** (the vector unit). Every optimization pass converts more of it to native
   code: run `install.cmd -Optimize` / `./install.sh --optimize` after playing new areas, or let the launcher's
   background optimization finish.
+- Clang builds (the Windows default) already use a speed profile (PGO) that ships with the repository and holds nothing from
+  the game. The launcher's **Optimize now** (`-Pgo on` / `--pgo on`) is an optional extra that trains a full one on your PC,
+  which in tests cut the VU1 and EE time per frame by about 20 % more (it opens the game by itself for 4 minutes).
 - A laptop **power-saving profile can halve the frame rate**, because it clocks down the CPU the VU1 thread needs.
 
 Measured reference points and the tuning order are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
