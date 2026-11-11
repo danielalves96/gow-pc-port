@@ -11,9 +11,11 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <emmintrin.h>
 #include <xmmintrin.h>
 
 namespace
@@ -54,6 +56,23 @@ namespace
         T value;
         std::memcpy(&value, data, sizeof(T));
         return value;
+    }
+}
+
+void GSProducerLock::lockSlow()
+{
+    for (unsigned spins = 0u;; ++spins)
+    {
+        uint32_t expected = 0u;
+        if (m_state.load(std::memory_order_relaxed) == 0u &&
+            m_state.compare_exchange_strong(expected, 1u, std::memory_order_acquire, std::memory_order_relaxed))
+            return;
+        if (spins < 256u)
+            _mm_pause();
+        else if (spins < 512u)
+            std::this_thread::yield();
+        else
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
 }
 
@@ -101,31 +120,34 @@ void GSThreadedBackend::SetEnabledByDefault(bool enabled)
 
 void GSThreadedBackend::Enqueue(Op op, const void *payload, uint32_t size)
 {
-    std::lock_guard<std::mutex> lock(m_producerMutex);
+    std::lock_guard<GSProducerLock> lock(m_producerMutex);
     const uint32_t csr = _mm_getcsr();
     if (csr != m_lastMxcsr)
     {
         m_lastMxcsr = csr;
-        const uint8_t header = static_cast<uint8_t>(Op::Mxcsr);
         const uint32_t csrSize = sizeof(csr);
-        m_open.push_back(header);
-        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&csrSize), reinterpret_cast<const uint8_t *>(&csrSize) + 4);
-        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&csr), reinterpret_cast<const uint8_t *>(&csr) + 4);
+        uint8_t *at = m_open.extend(1u + sizeof(csrSize) + sizeof(csr));
+        at[0] = static_cast<uint8_t>(Op::Mxcsr);
+        std::memcpy(at + 1u, &csrSize, sizeof(csrSize));
+        std::memcpy(at + 1u + sizeof(csrSize), &csr, sizeof(csr));
     }
+    // GOW-Port: header (kind + length) and payload written with one capacity check, not two vector inserts.
     const auto append = [&](Op kind, const void *bytes, uint32_t length)
     {
-        uint8_t header[5];
-        header[0] = static_cast<uint8_t>(kind);
-        std::memcpy(header + 1u, &length, sizeof(length));
-        m_open.insert(m_open.end(), header, header + sizeof(header));
+        uint8_t *at = m_open.extend(1u + sizeof(length) + length);
+        at[0] = static_cast<uint8_t>(kind);
+        std::memcpy(at + 1u, &length, sizeof(length));
         if (length)
-            m_open.insert(m_open.end(), static_cast<const uint8_t *>(bytes), static_cast<const uint8_t *>(bytes) + length);
+            std::memcpy(at + 1u + sizeof(length), bytes, length);
     };
     if (op == Op::Submit && m_compactQueue)
     {
         const auto &draw = *static_cast<const GSPrimitiveBatch *>(payload);
         // GOW-Port: field by field, not memcmp (padding bytes are unspecified: with clang no two states compared equal).
-        if (!m_drawStateValid || !(m_lastDrawState == draw.state))
+        // Identical bytes imply identical fields, so a memcmp that matches is conclusive and costs a few vector compares;
+        // only a mismatch (a real change, or different padding) pays for the field-by-field comparison.
+        if (!m_drawStateValid ||
+            !(std::memcmp(&m_lastDrawState, &draw.state, sizeof(draw.state)) == 0 || m_lastDrawState == draw.state))
         {
             std::memcpy(&m_lastDrawState, &draw.state, sizeof(draw.state));
             m_drawStateValid = true;
@@ -144,7 +166,7 @@ void GSThreadedBackend::PublishLocked()
     if (m_open.empty())
         return;
     static const bool queueDiag = std::getenv("GOW_GS_QUEUE_DIAG") != nullptr;
-    std::vector<uint8_t> next;
+    GSCommandBuffer next;
     {
         std::unique_lock<std::mutex> lock(m_queueMutex);
         const auto waitStart = queueDiag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -178,7 +200,7 @@ void GSThreadedBackend::Drain() const
     auto *self = const_cast<GSThreadedBackend *>(this);
     uint64_t target = 0u;
     {
-        std::lock_guard<std::mutex> lock(m_producerMutex);
+        std::lock_guard<GSProducerLock> lock(m_producerMutex);
         self->PublishLocked();
         std::lock_guard<std::mutex> queueLock(m_queueMutex);
         target = m_published;
@@ -195,7 +217,7 @@ void GSThreadedBackend::WorkerLoop()
     GSPrimitiveBatch draw;
     for (;;)
     {
-        std::vector<uint8_t> chunk;
+        GSCommandBuffer chunk;
         {
             std::unique_lock<std::mutex> lock(m_queueMutex);
             m_workCv.wait(lock, [&]
@@ -222,7 +244,7 @@ void GSThreadedBackend::WorkerLoop()
     }
 }
 
-void GSThreadedBackend::Execute(const std::vector<uint8_t> &chunk, GSPrimitiveBatch &draw)
+void GSThreadedBackend::Execute(const GSCommandBuffer &chunk, GSPrimitiveBatch &draw)
 {
     const uint8_t *data = chunk.data();
     const size_t size = chunk.size();
@@ -390,7 +412,7 @@ PresentationFrame GSThreadedBackend::Present(const GSPresentationRequest &reques
                 return {};
         }
         Enqueue(Op::Present, &request, sizeof(request));
-        std::lock_guard<std::mutex> lock(m_producerMutex);
+        std::lock_guard<GSProducerLock> lock(m_producerMutex);
         PublishLocked();
         return {};
     }
