@@ -64,7 +64,9 @@ scripts\ab-perf.ps1 -ExeA old\gow-2005.exe -ExeB new\gow-2005.exe -Elf <game>\SC
 ```
 
 `-Cores 4` pins the game to the first four logical processors, a rough stand-in for a weaker PC (the target of most
-of this work); the summary also counts frames over 50 ms (`GOW_FRAMES_HITCH_LOG=1`). Comparing a switch on the same
+of this work); the summary also counts frames over 50 ms (`GOW_FRAMES_HITCH_LOG=1`). Before the pairs the script runs A
+once for `-WarmupRunSeconds` (default 90) and discards it: the first run of a series used to meet a cool machine and was
+by far the fastest (2 cores: 55-59 FPS against ~40 for the next runs), always in favour of A. Comparing a switch on the same
 executable works with `-SetA`/`-SetB`. Early FINISH, measured that way on the ship's combat (3 pairs of 150 s, god mode,
 scripted attacks):
 

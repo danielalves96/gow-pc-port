@@ -3,7 +3,10 @@
 #   scripts\ab-perf.ps1 -ExeA <old gow-2005.exe> -ExeB <new gow-2005.exe> -Elf <SCUS_973.99> -EnvFile <gow-cli env output>
 #                       [-WorkDir <folder>] [-Pairs 4] [-Seconds 150] [-WarmupSeconds 30] [-PadScript '5:start,12:x,...']
 #                       [-Set 'NAME=VALUE', ...] [-SetA 'NAME=VALUE', ...] [-SetB 'NAME=VALUE', ...] [-OutDir <folder>]
-#                       [-Cores 4]
+#                       [-Cores 4] [-WarmupRunSeconds 90]
+#
+# -WarmupRunSeconds N first runs A for N seconds and discards it (0: none). Without it the first run of a series met a
+# cool machine and was the fastest by far (2 cores: 55-59 FPS against ~40 for the next runs), and it is always variant A.
 #
 # -Cores N pins the game to the first N logical processors, to approximate a weaker PC (the target of most performance
 # work); 0 (the default) leaves the affinity alone.
@@ -36,7 +39,8 @@ param(
     [string[]]$SetA = @(),
     [string[]]$SetB = @(),
     [string]$OutDir = '',
-    [int]$Cores = 0
+    [int]$Cores = 0,
+    [int]$WarmupRunSeconds = 90
 )
 $ErrorActionPreference = 'Stop'
 
@@ -193,6 +197,13 @@ Write-Host "B: $ExeB $(($variantEnv.B.Keys | ForEach-Object { "$_=$($variantEnv.
 Write-Host "Logs: $OutDir"
 $results = New-Object System.Collections.Generic.List[object]
 $index = 0
+if ($WarmupRunSeconds -gt 0) {
+    # Warms the machine up like the runs that follow; its numbers are not used.
+    $measured = $Seconds
+    $Seconds = $WarmupRunSeconds
+    [void](Invoke-Run 'A' $ExeA 0)
+    $Seconds = $measured
+}
 for ($pair = 0; $pair -lt $Pairs; $pair++) {
     # A B, then B A, so neither variant always runs on a cooler or warmer machine.
     $order = if ($pair % 2 -eq 0) { @('A', 'B') } else { @('B', 'A') }
