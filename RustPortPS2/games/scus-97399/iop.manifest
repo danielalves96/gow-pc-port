@@ -1,0 +1,11 @@
+# IOP modules the game loads: IRX file on the disc, physical load base (module arena order), text size and FNV-1a hash of
+# the relocated text. No game bytes: ps2-tools iop-manifest apply rebuilds the PS2X_IOP_DUMP_MODULES dump from the disc's IRX files.
+V 1
+M SIO2MAN.IRX 10000 f40 1382b06ff1a52d50
+M DBCMAN.IRX 11000 22a0 69e372e4c2fc2147
+M SIO2D.IRX 16200 1b20 610bdfda12df2dd2
+M MC2_D.IRX 19000 3400 321aa71f6bfb9dc3
+M DS2U_D.IRX 1dd00 21c0 4ef8720d5acb11c1
+M LIBSD.IRX 20400 4840 793db85fafdd4f41
+M 989NOMID.IRX 25e00 1d300 b6aacc61174545a
+M SMPD_IOP.IRX 4c900 7710 6969f8a4e32fc2ff

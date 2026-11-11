@@ -4,6 +4,7 @@
 //! - [`iso`]: `iso-extract`, the ISO9660 extractor that also records the disc layout.
 //! - [`vu1`]: `vu1-manifest` and `vu1-programs`, the VU1 micro-memories built from the ELF.
 //! - [`iop_gen`]: `iop-gen`, the IRX modules compiled ahead of time to C++.
+//! - [`iop_manifest`]: `iop-manifest`, the IOP module dump rebuilt from the disc's IRX files (no game session).
 //! - [`vu1n_gen`]: `vu1n-gen`, the native VU1 block generator.
 //! - [`memcard`]: `mc-format` and `mc-check`, the 8 MB memory card image.
 //! - [`xdelta`]: `xdelta-apply`, applies an xdelta3 (VCDIFF) translation patch to the disc.
@@ -15,6 +16,7 @@ pub mod elfcheck;
 mod flac;
 pub mod hash;
 pub mod iop_gen;
+pub mod iop_manifest;
 pub mod iso;
 pub mod memcard;
 pub mod vu1;
