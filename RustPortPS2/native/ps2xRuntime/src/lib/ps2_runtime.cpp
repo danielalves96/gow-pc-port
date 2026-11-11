@@ -655,8 +655,26 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
     // (the perf scope reads the host clock twice, which was ~40 % of the EE thread with GOW_PERF_DIAG=1).
     if (!m_iopSubsystem->accrueEeCycles(eeCycles))
         return;
-    ps2_perf::Scope perf(ps2_perf::Bucket::Iop);
-    m_iopSubsystem->runPendingEeCycles();
+    // GOW-Port: with GOW_PERF_DIAG=1 (which the launcher always sets) a scope per batch read the clock twice at ~70 k
+    // batches/s. One batch in kIopPerfSample is timed (scope + two reads) and its time is scaled to the others, moved
+    // from the enclosing bucket to Iop, so the report keeps its meaning with a fraction of the clock reads.
+    constexpr uint32_t kIopPerfSample = 8u;
+    thread_local uint32_t batchCounter = 0u;
+    if (!ps2_perf::enabled() || (++batchCounter % kIopPerfSample) != 0u)
+    {
+        m_iopSubsystem->runPendingEeCycles();
+        return;
+    }
+    const ps2_perf::Bucket enclosing = ps2_perf::accounting.active;
+    const uint64_t start = ps2_perf::nowNanos();
+    {
+        ps2_perf::Scope perf(ps2_perf::Bucket::Iop);
+        m_iopSubsystem->runPendingEeCycles();
+    }
+    const uint64_t extra = (ps2_perf::nowNanos() - start) * (kIopPerfSample - 1u);
+    ps2_perf::nanos[static_cast<size_t>(ps2_perf::Bucket::Iop)].fetch_add(extra, std::memory_order_relaxed);
+    if (enclosing != ps2_perf::Bucket::None)
+        ps2_perf::nanos[static_cast<size_t>(enclosing)].fetch_sub(extra, std::memory_order_relaxed);
 }
 
 uint64_t PS2Runtime::iopEeCyclesUntilBatch() const noexcept
