@@ -205,6 +205,19 @@ A dual-core PC holds a steady 60 FPS now, with room to spare per thread; a singl
 faster per core than an old dual core: the per-frame thread times above (EE, the critical path, ~4 ms of the 16.7 ms frame)
 are the margin left for slower cores.
 
+Slower cores, approximated by a helper that spins at time-critical priority for a fixed share of every 10 ms on the same
+two processors (dual core without SMT, 120 s windows, frames counted; the hitches are those over 100 ms per run):
+
+| CPU share left to the game | `d01ed93` | this branch |
+|---|---|---|
+| 100 % (the test CPU) | 46.8 FPS, 113-139 hitches | 60.0 FPS, 1 hitch |
+| 67 % (a dual core ~1.5x slower per core) | 41.2 FPS, 159 hitches | 54-55 FPS, 1 hitch |
+| 50 % (~2x slower) | 33.3 FPS, 181 hitches | 51-52 FPS, 1 hitch |
+
+The helper takes the CPU in 3-5 ms slices, which hurts frame pacing more than a uniformly slower CPU would, so this is a
+pessimistic estimate. On a dual core much slower than the test CPU the game runs smoothly but below 60 FPS: the next step
+there is still the structural work listed below.
+
 ### Rounds 3 to 5 (2026-11-12): what did not pay
 
 Each measured on 2 cores the same way (3 alternating pairs after a warm-up run, against the build before it); kept only
