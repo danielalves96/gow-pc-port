@@ -63,7 +63,7 @@ scripts\ab-perf.ps1 -ExeA old\gow-2005.exe -ExeB new\gow-2005.exe -Elf <game>\SC
     -Pairs 4 -Seconds 150 -WarmupSeconds 30 -PadScript '5:start,12:x,18:x,24:x,30:x,36:x'
 ```
 
-`-Cores 4` pins the game to the first four logical processors, a rough stand-in for a weaker PC (the target of most
+`-Cores 4` pins the game to the first four logical processors, a rough stand-in for a weaker PC (on a CPU with SMT those are two physical cores: Windows numbers the two threads of a core next to each other; `-AffinityMask 0x5` gives a dual core without SMT) (the target of most
 of this work); the summary also counts frames over 50 ms (`GOW_FRAMES_HITCH_LOG=1`). Before the pairs the script runs A
 once for `-WarmupRunSeconds` (default 90) and discards it: the first run of a series used to meet a cool machine and was
 by far the fastest (2 cores: 55-59 FPS against ~40 for the next runs), always in favour of A. Comparing a switch on the same

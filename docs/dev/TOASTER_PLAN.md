@@ -187,6 +187,24 @@ worker pushed its markers into a stage that was never started); fixed, it is now
 the EE, the VU1 and the GL driver sharing two cores: the VU1 kernels in SIMD (design note below), and the GL thread's own
 cost (`addVertex`, draw submission) are the next candidates.
 
+### What "2 cores" and "4 cores" were, and the dual-core result
+
+The test CPU (Core i5-12400F) has 6 physical cores with SMT, and Windows numbers the two threads of a core next to each
+other (`GetLogicalProcessorInformation`: core masks 0x3, 0xC, 0x30...). So `ab-perf.ps1 -Cores 2` pinned the game to **one
+physical core** with two threads, and `-Cores 4` to **two physical cores with SMT** (a 2-core/4-thread Pentium or i3).
+`-AffinityMask 0x5` (new) pins two threads on two different cores: a dual core without SMT. The low-core policies count
+logical processors, so a 2C/4T PC gets the 4-processor behaviour, which is what the `-Cores 4` runs measured.
+
+| Configuration (60 FPS cap, launcher environment, 3 alternating pairs after a warm-up run) | `d01ed93` | this branch |
+|---|---|---|
+| Dual core without SMT (2C/2T, `-AffinityMask 0x5`) | 46.8 FPS, worst 5 s window 31.8, p95 57.1 ms, 230 frames over 50 ms, 113-139 hitches over 100 ms per run | **60.0 FPS, worst window 59.7, p95 18.2 ms, 0 frames over 50 ms, 1 hitch (start-up)**; EE 4.0, VU1 3.4, GS 2.2 ms per frame |
+| Dual core with SMT (2C/4T, `-Cores 4`) | 60.0 FPS | 60.0 FPS with much less CPU (VU1 -17 %, GS -55 %) |
+| One core with SMT (1C/2T, `-Cores 2`) | 38.9 FPS | 54.4 FPS, frames over 50 ms 426 -> 8-17 |
+
+A dual-core PC holds a steady 60 FPS now, with room to spare per thread; a single physical core does not. The test CPU is
+faster per core than an old dual core: the per-frame thread times above (EE, the critical path, ~4 ms of the 16.7 ms frame)
+are the margin left for slower cores.
+
 ### Rounds 3 to 5 (2026-11-12): what did not pay
 
 Each measured on 2 cores the same way (3 alternating pairs after a warm-up run, against the build before it); kept only
