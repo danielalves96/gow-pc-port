@@ -218,6 +218,12 @@ The helper takes the CPU in 3-5 ms slices, which hurts frame pacing more than a 
 pessimistic estimate. On a dual core much slower than the test CPU the game runs smoothly but below 60 FPS: the next step
 there is still the structural work listed below.
 
+Where the CPU goes on a dual core (90 s of combat at 60 FPS, CPU time per thread from the system, test CPU speed): the VU1
+worker (VU1, VIF1 and, below 4 processors, the GS frontend) 63 % of a core, the GL thread 35 %, the AMD driver's own thread
+15 %, the game thread (EE, IOP, audio) 25 %: about 1.46 of the 2 cores. A dual core 1.5-2x slower per core needs about 30 %
+less in total to hold 60 FPS, and the largest share is the VU1 worker, then the video driver path. Presenting the window at
+60 Hz instead of the launcher's 120 does not help (53.2 vs 54.9 FPS at 67 % CPU share, 3 runs each).
+
 ### Rounds 3 to 5 (2026-11-12): what did not pay
 
 Each measured on 2 cores the same way (3 alternating pairs after a warm-up run, against the build before it); kept only
