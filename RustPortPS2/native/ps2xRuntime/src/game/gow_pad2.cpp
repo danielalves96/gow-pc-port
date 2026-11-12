@@ -199,6 +199,9 @@ namespace gow_game
     {
         gowPad2ReadState(rdram, ctx, runtime);
         gowWarpPoll(rdram, ctx, runtime);
+        static const bool saveLoad = [] { const char *v = std::getenv("GOW_SAVE_LOAD"); return !v || v[0] != '0'; }();
+        if (saveLoad)
+            gowSaveLoadPoll(rdram, ctx, runtime);
     }
 
     // 0x27BF90 sceVibGetProfile(socket, u8 *profile) -> profile size in bytes

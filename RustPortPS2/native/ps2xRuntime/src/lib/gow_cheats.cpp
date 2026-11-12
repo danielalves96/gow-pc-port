@@ -19,6 +19,8 @@
 //     and signals the thresholds it crosses (boss phases); ends up calling 0x1E0A80.
 #include "gow_cheats.h"
 #include "gow_persist.h" // GOW-Port: a change is written back for the launcher
+#include "gow_notice.h"
+#include "gow_save_backup.h" // GOW-Port: the Saves page loads a slot of the card
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "raylib.h"
@@ -293,6 +295,18 @@ namespace
         const char *shortcutHelp;
         const char *name[kNumCheats];
         const char *description[kNumCheats];
+        // GOW-Port: the Saves page (a slot of the card, loaded through the game's own Load)
+        const char *tabCheats;
+        const char *tabSaves;
+        const char *savesTitle;
+        const char *savesSubtitle;
+        const char *savesEmpty;
+        const char *slot;
+        const char *load;
+        const char *confirm;
+        const char *confirmText;
+        const char *savesHelp;
+        const char *pageHelp;
     };
 
     const Texts kEnglish = {
@@ -312,6 +326,17 @@ namespace
          "Zeus's Fury, Medusa's Gaze, Poseidon's Rage, Army of Hades, Blade of Artemis, Poseidon's Trident.",
          "Every Gorgon Eye and Phoenix Feather upgrade.",
          "God Mode difficulty, costumes, videos, Challenge of the Gods. Permanent once you save."},
+        "Cheats",
+        "Saves",
+        "LOAD A SAVE",
+        "The saves on memory card 1, as the game lists them",
+        "No save on the card yet (the list appears once the game has read the card).",
+        "Slot",
+        "LOAD",
+        "CONFIRM",
+        "Press again to load. Progress since your last save is lost.",
+        "↑↓ / D-pad select    Enter / A (✕) load",
+        "Tab / LB RB (L1 R1) page",
     };
 
     const Texts kPortuguesee = {
@@ -331,6 +356,17 @@ namespace
          "Fúria de Zeus, Olhar da Medusa, Ira de Poseidon, Exército de Hades, Lâmina de Ártemis, Tridente de Poseidon.",
          "Todas as melhorias de Olhos de Górgona e Penas de Fênix.",
          "Dificuldade Modo Deus, trajes, vídeos, Desafio dos Deuses. Fica permanente ao salvar."},
+        "Extras",
+        "Saves",
+        "CARREGAR UM SAVE",
+        "Os saves do cartão de memória 1, na ordem do jogo",
+        "Nenhum save no cartão ainda (a lista aparece depois que o jogo lê o cartão).",
+        "Slot",
+        "CARREGAR",
+        "CONFIRMAR",
+        "Aperte de novo para carregar. O progresso desde o último save se perde.",
+        "↑↓ / direcional escolher    Enter / A (✕) carregar",
+        "Tab / LB RB (L1 R1) página",
     };
 
     const Texts &texts()
@@ -487,6 +523,10 @@ namespace
         int selected = 0;
         int closeKey = 0;
         bool cursorHidden = false;
+        int page = 0;          // GOW-Port: 0 cheats, 1 saves
+        int savesSelected = 0;
+        int armed = -1;        // the save row waiting for its confirmation press
+        double armedAt = 0.0;
     };
     MenuState g_menu;
 
@@ -508,6 +548,46 @@ namespace
         g.x = std::floor((sw - g.w) * 0.5f);
         g.y = std::floor((sh - g.h) * 0.5f);
         return g;
+    }
+
+    // GOW-Port: the Saves page lists what the game holds of the card (published by src/game/gow_save_load.cpp).
+    const std::vector<GowSaveSlotInfo> &menuSlots()
+    {
+        static std::vector<GowSaveSlotInfo> slots;
+        static double refreshed = -1.0;
+        if (GetTime() - refreshed > 0.25)
+        {
+            slots = gowSaveSlotsSnapshot();
+            refreshed = GetTime();
+        }
+        return slots;
+    }
+
+    int rowCount()
+    {
+        return g_menu.page == 0 ? kNumCheats : static_cast<int>(menuSlots().size());
+    }
+
+    void close(bool escClosesGame, int key);
+
+    // First press arms the row, a second one within four seconds asks the game for that slot and closes the menu.
+    void activateSave(int row, bool escClosesGame)
+    {
+        const std::vector<GowSaveSlotInfo> &slots = menuSlots();
+        if (row < 0 || row >= static_cast<int>(slots.size()))
+            return;
+        if (g_menu.armed != row || GetTime() - g_menu.armedAt > 4.0)
+        {
+            g_menu.armed = row;
+            g_menu.armedAt = GetTime();
+            return;
+        }
+        g_menu.armed = -1;
+        const GowSaveSlotInfo &slot = slots[row];
+        std::cerr << "[cheats] load of slot " << slot.slot + 1 << " asked from the menu" << std::endl;
+        gowSaveLoadRequest(slot.slot);
+        close(escClosesGame, 0);
+        g_blockAfterClose.store(true, std::memory_order_release);
     }
 
     void setActive(int index, bool next)
@@ -717,7 +797,12 @@ void gowCheatsMenuInput(bool escClosesGame)
     {
         const bool test = openAt >= 0.0 && GetTime() >= openAt;
         if (test)
+        {
             openAt = -1.0;
+            // GOW-Port: PC_CHEATS_OPEN_PAGE=saves opens the test menu on the Saves page
+            if (const char *page = std::getenv("PC_CHEATS_OPEN_PAGE"); page && std::strcmp(page, "saves") == 0)
+                g_menu.page = 1;
+        }
         if (IsKeyPressed(KEY_F2) || test || customTrigger)
             open(escClosesGame);
         return;
@@ -740,31 +825,58 @@ void gowCheatsMenuInput(bool escClosesGame)
         return;
     }
 
-    int &selected = g_menu.selected;
     const bool gamepad = IsGamepadAvailable(0);
+    // GOW-Port: two pages, cheats and saves
+    if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_Q) || IsKeyPressed(KEY_E) ||
+        (gamepad && (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_TRIGGER_1) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))))
+    {
+        g_menu.page = 1 - g_menu.page;
+        g_menu.armed = -1;
+    }
+    const int rows = rowCount();
+    int &selected = g_menu.page == 0 ? g_menu.selected : g_menu.savesSelected;
+    if (rows == 0)
+        return;
+    selected = std::clamp(selected, 0, rows - 1);
+    const int before = selected;
     if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP) || IsKeyPressed(KEY_W) ||
         (gamepad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP)))
-        selected = (selected + kNumCheats - 1) % kNumCheats;
+        selected = (selected + rows - 1) % rows;
     if (IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN) || IsKeyPressed(KEY_S) ||
         (gamepad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN)))
-        selected = (selected + 1) % kNumCheats;
-    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_LEFT) ||
-        IsKeyPressed(KEY_RIGHT) || (gamepad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)))
-        toggle(selected);
+        selected = (selected + 1) % rows;
+    if (selected != before)
+        g_menu.armed = -1;
+    const auto activate = [&](int row) {
+        if (g_menu.page == 0)
+            toggle(row);
+        else
+            activateSave(row, escClosesGame);
+    };
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE) ||
+        (g_menu.page == 0 && (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT))) ||
+        (gamepad && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN)))
+    {
+        activate(selected);
+        return;
+    }
 
     const Geometry g = geometry();
     const Vector2 mouse = GetMousePosition();
     const float rowsY = g.y + g.header;
-    if (mouse.x >= g.x && mouse.x < g.x + g.w && mouse.y >= rowsY && mouse.y < rowsY + g.row * static_cast<float>(kNumCheats))
+    if (mouse.x >= g.x && mouse.x < g.x + g.w && mouse.y >= rowsY && mouse.y < rowsY + g.row * static_cast<float>(rows))
     {
-        const int over = std::clamp(static_cast<int>((mouse.y - rowsY) / g.row), 0, kNumCheats - 1);
+        const int over = std::clamp(static_cast<int>((mouse.y - rowsY) / g.row), 0, rows - 1);
         const Vector2 delta = GetMouseDelta();
-        if (delta.x != 0.0f || delta.y != 0.0f)
+        if ((delta.x != 0.0f || delta.y != 0.0f) && over != selected)
+        {
             selected = over;
+            g_menu.armed = -1;
+        }
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             selected = over;
-            toggle(over);
+            activate(over);
         }
     }
 }
@@ -800,8 +912,26 @@ void gowCheatsMenuDraw()
 
     const float margin = 36.0f * s;
     const float titleSize = 30.0f * s, subSize = 15.0f * s;
-    drawText(f.bold, t.title, g.x + margin, g.y + 24.0f * s, titleSize, kInk);
-    drawText(f.regular, t.subtitle, g.x + margin, g.y + 24.0f * s + titleSize + 6.0f * s, subSize, kInkMuted);
+    const bool savesPage = g_menu.page == 1;
+    drawText(f.bold, savesPage ? t.savesTitle : t.title, g.x + margin, g.y + 24.0f * s, titleSize, kInk);
+    drawText(f.regular, savesPage ? t.savesSubtitle : t.subtitle, g.x + margin, g.y + 24.0f * s + titleSize + 6.0f * s, subSize,
+             kInkMuted);
+    // GOW-Port: page tabs at the right of the header; the current one is red and underlined
+    {
+        const float tabSize = 17.0f * s, gap = 22.0f * s;
+        float tx = g.x + g.w - margin;
+        for (int page = 1; page >= 0; --page)
+        {
+            const char *label = page == 0 ? t.tabCheats : t.tabSaves;
+            const float width = textWidth(f.bold, label, tabSize);
+            tx -= width;
+            const float ty = g.y + 30.0f * s;
+            drawText(f.bold, label, tx, ty, tabSize, page == g_menu.page ? kRed : kInkMuted);
+            if (page == g_menu.page)
+                DrawLineEx(Vector2{tx, ty + tabSize + 4.0f * s}, Vector2{tx + width, ty + tabSize + 4.0f * s}, std::max(1.5f, 2.0f * s), kRed);
+            tx -= gap;
+        }
+    }
     // Header rule with a red gem at its start, as in the launcher's group titles.
     const float ruleY = g.y + g.header - 4.0f * s;
     DrawLineEx(Vector2{g.x + margin, ruleY}, Vector2{g.x + g.w - margin, ruleY}, std::max(1.5f, 2.0f * s), kBronze);
@@ -809,13 +939,21 @@ void gowCheatsMenuDraw()
 
     const float nameSize = 21.0f * s, descSize = 15.0f * s;
     const float switchW = 54.0f * s, switchH = 28.0f * s;
-    for (int i = 0; i < kNumCheats; ++i)
+    const std::vector<GowSaveSlotInfo> &slots = menuSlots();
+    const int rows = savesPage ? static_cast<int>(slots.size()) : kNumCheats;
+    const int selectedRow = savesPage ? g_menu.savesSelected : g_menu.selected;
+    if (savesPage && rows == 0)
+    {
+        const std::string empty = truncate(f.regular, t.savesEmpty, descSize + 2.0f * s, g.w - margin * 2.0f);
+        drawText(f.regular, empty.c_str(), g.x + margin, g.y + g.header + 24.0f * s, descSize + 2.0f * s, kInkMuted);
+    }
+    for (int i = 0; i < rows; ++i)
     {
         const float fy = g.y + g.header + g.row * static_cast<float>(i);
         if (fy + g.row > g.y + g.h - g.footer + 1.0f)
             break;
-        const bool on = g_active[i].load(std::memory_order_relaxed);
-        const bool sel = i == g_menu.selected;
+        const bool on = !savesPage && g_active[i].load(std::memory_order_relaxed);
+        const bool sel = i == selectedRow;
         const float rowX = g.x + inset + 6.0f * s, rowW = g.w - (inset + 6.0f * s) * 2.0f;
         if (sel)
         {
@@ -825,24 +963,50 @@ void gowCheatsMenuDraw()
             DrawRectangleLinesEx(Rectangle{rowX, fy + 3.0f * s, rowW, g.row - 6.0f * s}, line, Color{255, 220, 190, 70});
         }
         const float textX = g.x + margin;
-        const float textMax = g.w - margin * 2.0f - switchW - 20.0f * s;
         const float block = nameSize + 6.0f * s + descSize;
         const float ty = fy + (g.row - block) * 0.5f;
-        const Color nameColor = sel ? kCream : (on ? kRed : kInk);
-        drawText(f.bold, t.name[i], textX, ty, nameSize, nameColor);
-        const std::string desc = truncate(f.regular, t.description[i], descSize, textMax);
-        drawText(f.regular, desc.c_str(), textX, ty + nameSize + 6.0f * s, descSize, sel ? Color{243, 228, 195, 225} : kInkMuted);
+        if (savesPage)
+        {
+            // GOW-Port: a slot as the game's own list shows it: place, then difficulty, play time and slot number
+            const GowSaveSlotInfo &slot = slots[i];
+            const bool armed = g_menu.armed == i && GetTime() - g_menu.armedAt <= 4.0;
+            const char *action = armed ? t.confirm : t.load;
+            const float actionSize = 15.0f * s;
+            const float actionW = textWidth(f.bold, action, actionSize) + 28.0f * s, actionH = 30.0f * s;
+            const float textMax = g.w - margin * 2.0f - actionW - 20.0f * s;
+            std::string name = slot.place.empty() ? std::string(t.slot) + " " + std::to_string(slot.slot + 1) : slot.place;
+            name = truncate(f.bold, name.c_str(), nameSize, textMax);
+            drawText(f.bold, name.c_str(), textX, ty, nameSize, sel ? kCream : kInk);
+            std::string detail = armed ? std::string(t.confirmText)
+                                       : (slot.difficultyName.empty() ? std::string() : slot.difficultyName + "  ·  ") +
+                                             gowSavePlayTime(slot.playSeconds) + "  ·  " + t.slot + " " + std::to_string(slot.slot + 1);
+            detail = truncate(f.regular, detail.c_str(), descSize, textMax);
+            drawText(f.regular, detail.c_str(), textX, ty + nameSize + 6.0f * s, descSize,
+                     sel ? Color{243, 228, 195, 225} : (armed ? kRed : kInkMuted));
+            const Rectangle button{g.x + g.w - margin - actionW, fy + (g.row - actionH) * 0.5f, actionW, actionH};
+            DrawRectangleRounded(button, 0.35f, 8, armed ? Color{140, 31, 20, 255} : (sel ? kCream : Color{185, 165, 125, 255}));
+            DrawRectangleRoundedLinesEx(button, 0.35f, 8, std::max(1.5f, 2.0f * s), armed ? Color{90, 15, 8, 255} : kBronze);
+            drawText(f.bold, action, button.x + 14.0f * s, button.y + (actionH - actionSize) * 0.5f, actionSize, armed ? kCream : kInk);
+        }
+        else
+        {
+            const float textMax = g.w - margin * 2.0f - switchW - 20.0f * s;
+            const Color nameColor = sel ? kCream : (on ? kRed : kInk);
+            drawText(f.bold, t.name[i], textX, ty, nameSize, nameColor);
+            const std::string desc = truncate(f.regular, t.description[i], descSize, textMax);
+            drawText(f.regular, desc.c_str(), textX, ty + nameSize + 6.0f * s, descSize, sel ? Color{243, 228, 195, 225} : kInkMuted);
 
-        // Switch: red track with a cream knob when on, tan track when off.
-        const Rectangle track{g.x + g.w - margin - switchW, fy + (g.row - switchH) * 0.5f, switchW, switchH};
-        DrawRectangleRounded(track, 1.0f, 12, on ? Color{140, 31, 20, 255} : Color{185, 165, 125, 255});
-        DrawRectangleRoundedLinesEx(track, 1.0f, 12, std::max(1.5f, 2.0f * s), on ? Color{90, 15, 8, 255} : kBronze);
-        const float radius = switchH * 0.5f - 3.5f * s;
-        const float cx = on ? track.x + track.width - switchH * 0.5f : track.x + switchH * 0.5f;
-        DrawCircleV(Vector2{cx, track.y + switchH * 0.5f}, radius, kCream);
-        DrawCircleLines(static_cast<int>(cx), static_cast<int>(track.y + switchH * 0.5f), radius, kBronze);
+            // Switch: red track with a cream knob when on, tan track when off.
+            const Rectangle track{g.x + g.w - margin - switchW, fy + (g.row - switchH) * 0.5f, switchW, switchH};
+            DrawRectangleRounded(track, 1.0f, 12, on ? Color{140, 31, 20, 255} : Color{185, 165, 125, 255});
+            DrawRectangleRoundedLinesEx(track, 1.0f, 12, std::max(1.5f, 2.0f * s), on ? Color{90, 15, 8, 255} : kBronze);
+            const float radius = switchH * 0.5f - 3.5f * s;
+            const float cx = on ? track.x + track.width - switchH * 0.5f : track.x + switchH * 0.5f;
+            DrawCircleV(Vector2{cx, track.y + switchH * 0.5f}, radius, kCream);
+            DrawCircleLines(static_cast<int>(cx), static_cast<int>(track.y + switchH * 0.5f), radius, kBronze);
+        }
 
-        if (i + 1 < kNumCheats && !sel && i + 1 != g_menu.selected)
+        if (i + 1 < rows && !sel && i + 1 != selectedRow)
             DrawLineEx(Vector2{g.x + margin, fy + g.row}, Vector2{g.x + g.w - margin, fy + g.row}, 1.0f, Color{95, 67, 38, 70});
     }
 
@@ -850,7 +1014,9 @@ void gowCheatsMenuDraw()
     DrawLineEx(Vector2{g.x + margin, footerY}, Vector2{g.x + g.w - margin, footerY}, std::max(1.5f, 2.0f * s), kBronze);
     const float footerTextSize = 14.0f * s;
     const float footerMaxWidth = g.w - margin * 2.0f;
-    drawText(f.regular, t.navigateHelp, g.x + margin, footerY + 11.0f * s, footerTextSize, kInkSoft);
+    const std::string navigate = std::string(savesPage ? t.savesHelp : t.navigateHelp) + "    " + t.pageHelp;
+    const std::string navigateLine = truncate(f.regular, navigate.c_str(), footerTextSize, footerMaxWidth);
+    drawText(f.regular, navigateLine.c_str(), g.x + margin, footerY + 11.0f * s, footerTextSize, kInkSoft);
     std::string closeHelp = t.closeHelp;
     if (const std::string shortcut = triggerHelp(); !shortcut.empty())
         closeHelp += "    " + shortcut + " " + t.shortcutHelp;

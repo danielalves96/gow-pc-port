@@ -69,7 +69,7 @@ game's own recompiled code and replaces the libraries that code calls with nativ
 - **Controls**: remappable keyboard and mouse, any gamepad, PS2 or modern layout, per-button swaps, vibration on
   Windows and Linux.
 - **Quality of life**: cheat menu (**F2**, nine cheats), target lock (**Alt**), agile combat, overlay with FPS, GPU, CPU and RAM (each one optional), fullscreen.
-- **Saves**: a PCSX2-compatible `Mcd001.ps2` memory card. Cards move between the two in either direction. A dated copy of the card is kept at every altar save, and the launcher's Saves tab restores one.
+- **Saves**: a PCSX2-compatible `Mcd001.ps2` memory card. Cards move between the two in either direction. A dated copy of the card is kept at every altar save. The launcher's Saves tab shows each save with its altar, thumbnail, difficulty and play time, loads one even with the game open, and restores a copy.
 - **Custom textures**: PCSX2 replacement packs work, and the launcher can download the community pack.
 - **RetroAchievements**: sign-in, in-game notifications and a hardcore mode that disables cheats.
 - **Launcher**: nine tabs, a setup wizard, background optimization, English and Brazilian Portuguese.

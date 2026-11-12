@@ -1089,3 +1089,53 @@ describe('automatic updates setting', () => {
     expect(screen.getByRole('switch', { name: 'Automatic updates' })).toBeChecked();
   });
 });
+
+describe('saves', () => {
+  const saves = {
+    slots: [
+      { index: 0, file: 'data0.bin', modifiedUnix: 1793936917, zone: 'Zone01A', playSeconds: 2902.96, savePoint: 4, difficulty: 0 },
+      { index: 3, file: 'data1.bin', modifiedUnix: 1793937000, zone: 'Zone09B', playSeconds: 59, savePoint: 9, difficulty: 2 },
+    ],
+    art: { places: { '4': 'Place Four' }, difficulties: ['Easy One', 'Normal One'], thumbnails: { '4': 'data:image/png;base64,AAAA' } },
+  };
+
+  it('shows each slot with the names and thumbnail read from the disc, and falls back to the zone code', async () => {
+    api = createMockApi({ ready: true, saves });
+    setApi(api);
+    render(<App />);
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Saves' }));
+    const cards = await screen.findAllByTestId('save-slot');
+    expect(cards).toHaveLength(2);
+    expect(within(cards[0]).getByText('Place Four')).toBeInTheDocument();
+    expect(within(cards[0]).getByText('Easy One · 0:48:22')).toBeInTheDocument();
+    expect(within(cards[0]).getByRole('img', { name: 'Place Four' })).toHaveAttribute('src', 'data:image/png;base64,AAAA');
+    // no name, no difficulty name and no thumbnail on the disc for the second one
+    expect(within(cards[1]).getByText('Zone Zone09B')).toBeInTheDocument();
+    expect(within(cards[1]).getByText('Difficulty 3 · 0:00:59')).toBeInTheDocument();
+    expect(within(cards[1]).queryByRole('img')).toBeNull();
+  });
+
+  it('loads a slot: with the game closed it asks for it and starts the game, while it runs it asks first', async () => {
+    api = createMockApi({ ready: true, saves });
+    setApi(api);
+    render(<App />);
+    const user = userEvent.setup();
+    const request = vi.spyOn(api, 'loadSaveSlot');
+    const start = vi.spyOn(api, 'startGame');
+    await user.click(await screen.findByRole('button', { name: 'Saves' }));
+    const cards = await screen.findAllByTestId('save-slot');
+    await user.click(within(cards[1]).getByRole('button', { name: 'Load' }));
+    await waitFor(() => expect(start).toHaveBeenCalled());
+    expect(request).toHaveBeenCalledWith(expect.any(String), 3);
+    expect(request.mock.invocationCallOrder[0]).toBeLessThan(start.mock.invocationCallOrder[0]);
+    // the game is running now: a second load asks before throwing the progress away
+    await screen.findByRole('button', { name: 'RUNNING' });
+    await user.click(within(screen.getAllByTestId('save-slot')[0]).getByRole('button', { name: 'Load' }));
+    expect(screen.getByText('Load slot 1? Progress since your last save is lost.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Yes, load' }));
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(request).toHaveBeenLastCalledWith(expect.any(String), 0);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText('The game is going to slot 1.')).toBeInTheDocument();
+  });
+});

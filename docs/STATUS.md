@@ -71,6 +71,13 @@ Last reviewed: October 2026, against the code in this repository.
   (altar glow gone, rest identical), render scale 0.75x (clean). **Not clean:** 0.5x and 0.25x show a tinted rectangle in
   bloom-heavy scenes. **Not reproduced:** the movie-end freeze of `P04MP05`; its wrappers are in but never triggered. **Not
   checked:** the tail-of-movie audio catch-up (needs ears), Linux for any of it, the in-game notice at other window sizes.
+- **Loading a slot from the launcher or the F2 menu** (Windows, private copies of a PCSX2 card): at start, during gameplay
+  and with the pause menu open the game went back to its main menu and loaded the slot asked for (the play time of each slot
+  confirms which one); an empty slot is refused without leaving the game. The launcher's Saves page reads the altar's
+  name, difficulty, play time and thumbnail from the card and the installed disc (checked against the retail disc). **Not
+  checked:** the F2 page with a real keyboard or gamepad (its drawing and the request path were), a request during a movie,
+  a level load or the save screen, a CHD install (the page falls back to the zone code), Linux. Details in
+  [`dev/MEMORY-CARD.md`](dev/MEMORY-CARD.md#loading-a-slot-from-outside-the-games-menus).
 
 - **Hang after saving (Windows):** after a save completes, a sequence of events can freeze the game. It was first
   traced to the VIF/DMA path; a 0.3.2 sample (clang build with the speed profile, early FINISH on) instead shows the game

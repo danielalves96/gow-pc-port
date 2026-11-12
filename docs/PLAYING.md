@@ -175,6 +175,11 @@ If you prefer the original timing, turn the switch off.
   `save-backups/` next to the card) and says so on screen. The launcher's **Saves** tab lists the saves on the card and the
   copies, and restores one with the game closed (the card it replaces is kept in the history first). `GOW_SAVE_BACKUP=0`
   turns the copies off.
+- **Loading a slot without the game's menus**: the launcher's **Saves** tab shows each save with its altar, thumbnail,
+  difficulty and play time, and **Load** takes you there, with the game open (it goes back to the main menu and loads the
+  slot by itself; progress since your last save is lost) or closed (the game starts on that save). In the game, **F2** then
+  **Tab** (or **LB/RB** on a gamepad) opens the same list; press the load button twice. `GOW_LOAD_SLOT=<0-3>` starts the game
+  on a slot, `GOW_SAVE_LOAD=0` turns the feature off.
 - A card file of the wrong size (cut, empty, or a 16/32 MB card) is never written over: it is renamed to
   `Mcd001.ps2.unusable` and the game gets a blank card. `ps2-tools mc-check Mcd001.ps2` checks a card, and
   `ps2-tools mc-format <file>` creates a formatted one.

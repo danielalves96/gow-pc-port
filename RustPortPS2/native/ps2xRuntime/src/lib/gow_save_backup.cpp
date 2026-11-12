@@ -4,6 +4,7 @@
 #include "ps2_runtime.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -200,4 +201,100 @@ GowSaveBackupResult gowSaveBackup(const char *source)
         return keep ? static_cast<size_t>(std::max(0l, std::atol(keep))) : static_cast<size_t>(30);
     }());
     return result;
+}
+
+// ---- Loading a slot from outside the game's own menus (gow_save_backup.h) ----------------------------------------------
+
+namespace
+{
+    std::atomic<int> g_memoryRequest{-1};
+
+    std::mutex &slotsMutex()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    std::vector<GowSaveSlotInfo> &publishedSlots()
+    {
+        static std::vector<GowSaveSlotInfo> slots;
+        return slots;
+    }
+
+    // A request older than this is a leftover (the launcher wrote it and the game never ran): it is dropped.
+    constexpr long long kRequestLifetimeSeconds = 600;
+}
+
+std::string gowSaveLoadRequestPath()
+{
+    const std::string card = gowSaveCardPath();
+    return card.empty() ? std::string() : (fs::path(card).parent_path() / "load-request").string();
+}
+
+void gowSaveLoadRequest(int slot)
+{
+    if (slot >= 0 && slot < 4)
+        g_memoryRequest.store(slot, std::memory_order_release);
+}
+
+int gowSaveLoadTakeRequest()
+{
+    const int memory = g_memoryRequest.exchange(-1, std::memory_order_acq_rel);
+    if (memory >= 0)
+        return memory;
+    static auto lastPoll = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastPoll < std::chrono::milliseconds(500))
+        return -1;
+    lastPoll = now;
+    static const std::string path = gowSaveLoadRequestPath();
+    std::error_code error;
+    if (path.empty() || !fs::exists(path, error))
+        return -1;
+    // take it by renaming it first, so a request the launcher writes meanwhile is a new file and is never lost half-read
+    const std::string taken = path + ".taken";
+    fs::remove(taken, error);
+    fs::rename(path, taken, error);
+    if (error)
+        return -1;
+    std::ifstream in(taken);
+    int slot = -1;
+    long long created = 0;
+    std::string line;
+    while (std::getline(in, line))
+    {
+        if (line.rfind("slot=", 0) == 0)
+            slot = std::atoi(line.c_str() + 5);
+        else if (line.rfind("created_unix=", 0) == 0)
+            created = std::atoll(line.c_str() + 13);
+    }
+    in.close();
+    fs::remove(taken, error);
+    const long long age = static_cast<long long>(std::time(nullptr)) - created;
+    if (slot < 0 || slot > 3 || created <= 0 || age > kRequestLifetimeSeconds || age < -60)
+    {
+        std::fprintf(stderr, "[gow-load] request file ignored (slot=%d, age=%lld s)\n", slot, age);
+        return -1;
+    }
+    return slot;
+}
+
+void gowSaveSlotsPublish(std::vector<GowSaveSlotInfo> slots)
+{
+    std::lock_guard<std::mutex> lock(slotsMutex());
+    publishedSlots() = std::move(slots);
+}
+
+std::vector<GowSaveSlotInfo> gowSaveSlotsSnapshot()
+{
+    std::lock_guard<std::mutex> lock(slotsMutex());
+    return publishedSlots();
+}
+
+std::string gowSavePlayTime(float seconds)
+{
+    const long total = seconds > 0.0f && seconds < 3.6e7f ? static_cast<long>(seconds) : 0L;
+    char text[32];
+    std::snprintf(text, sizeof(text), "%ld:%02ld:%02ld", total / 3600, total / 60 % 60, total % 60);
+    return text;
 }

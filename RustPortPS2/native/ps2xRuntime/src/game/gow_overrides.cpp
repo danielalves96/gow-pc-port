@@ -136,6 +136,13 @@ namespace
                 runtime.replaceFunction(0x0017AFE0u, gowDiagStreamRead);
         }
         runtime.replaceFunction(0x0022E800u, gowSaveWriteFile); // observes the end of a save (backup, notice)
+        if (const char *load = std::getenv("GOW_SAVE_LOAD"); !load || load[0] != '0')
+        {
+            // loading a slot from the launcher or the F2 menu: gameplay and pause frames can hand over to the main menu, which then picks Load
+            runtime.replaceFunction(0x0021F3C8u, gowSaveLoadGameplay);
+            runtime.replaceFunction(0x0021F638u, gowSaveLoadPause);
+            runtime.replaceFunction(0x0021EBF8u, gowSaveLoadMainMenu);
+        }
         if (const char *diag = std::getenv("GOW_LOADER_DIAG"); diag && std::strcmp(diag, "1") == 0)
             gowLoaderDiagInstall(runtime);
         // game logic rate (gow_logic_rate.cpp): PC_LOGIC_FPS > 60 paces the frame at N Hz, off by default

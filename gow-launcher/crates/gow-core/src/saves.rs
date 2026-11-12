@@ -5,9 +5,14 @@
 //! shows is read, never written: the superblock, the FAT and the game's folder `BASCUS-97399GodOfWar`, whose file of the same
 //! name is the game's own 68-byte slot index and whose `dataN.bin` files hold the saves (80 KiB each).
 //!
-//! Index layout (checked against real cards): four records of 16 bytes and a trailing word. A record is
-//! `[payload number, 0xCAFEBAD1, key, size]`; `0xFFFFFFFF` in the first word marks an empty slot. A payload that no record
-//! refers to is the spare the game writes the next save to.
+//! Index layout (checked against real cards and against the game's own save code, 0x230634..0x230670): four records of 16
+//! bytes and a trailing word. A record is `[u32 payload number, u32 0xCAFEBAD1, f32 play time in seconds, u16 save point,
+//! u8 difficulty, u8 0]`; `0xFFFFFFFF` in the first word marks an empty slot. A payload that no record refers to is the
+//! spare the game writes the next save to. The save point names the altar (and its thumbnail, `save_art.rs`); the
+//! difficulty is 0 to 3, easiest first.
+//!
+//! Loading a slot while the game runs: [`request_load`] writes `<card folder>/load-request`, which the runtime takes on
+//! its EE thread (`src/lib/gow_save_backup.cpp`) and walks the game's own path to that slot (`src/game/gow_save_load.cpp`).
 
 use std::fs;
 use std::io::Write;
@@ -23,7 +28,7 @@ const INDEX_MAGIC: u32 = 0xCAFE_BAD1;
 const SLOTS: usize = 4;
 
 /// One save of the card.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CardSlot {
     /// Position in the game's index (0..=3), the order the game lists them.
@@ -34,6 +39,12 @@ pub struct CardSlot {
     pub modified_unix: i64,
     /// The zone the save stands in (`Athn02C`), the first name of the payload.
     pub zone: String,
+    /// Play time in seconds, as the game shows it (`h:mm:ss`).
+    pub play_seconds: f64,
+    /// The altar the save was made at (1..=41 on the retail disc; 0 when unknown).
+    pub save_point: u16,
+    /// 0 to 3, easiest first.
+    pub difficulty: u8,
 }
 
 /// A dated copy of the card.
@@ -250,11 +261,15 @@ pub fn read_card_slots(image: &[u8]) -> Vec<CardSlot> {
         let data = card.file(entry);
         let zone_bytes = data.get(8..8 + 16).unwrap_or(&[]);
         let end = zone_bytes.iter().position(|&b| b == 0).unwrap_or(zone_bytes.len());
+        let play = f32::from_bits(u32_at(&index, at + 8));
         slots.push(CardSlot {
             index: slot,
             file: name,
             modified_unix: card_time_unix(entry.modified),
             zone: String::from_utf8_lossy(&zone_bytes[..end]).into_owned(),
+            play_seconds: if play.is_finite() && play >= 0.0 { f64::from(play) } else { 0.0 },
+            save_point: u16_at(&index, at + 12),
+            difficulty: index.get(at + 14).copied().unwrap_or(0),
         });
     }
     slots
@@ -263,6 +278,30 @@ pub fn read_card_slots(image: &[u8]) -> Vec<CardSlot> {
 /// The saves of the card file at `path`.
 pub fn read_card_file_slots(path: &Path) -> Vec<CardSlot> {
     fs::read(path).map(|image| read_card_slots(&image)).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Loading a slot while the game runs
+
+/// `<card folder>/load-request`, the file the runtime looks for (`gow_save_backup.h`).
+pub fn load_request_file(card: &Path) -> PathBuf {
+    card.parent().unwrap_or_else(|| Path::new("")).join("load-request")
+}
+
+/// Asks the game for slot `index` (0..=3): `slot=<index>` and `created_unix=<now>`, published with a rename so the
+/// runtime never reads half a file. The runtime ignores a request older than ten minutes, so one written before the game
+/// starts is taken once its main menu is up, and a leftover is not.
+pub fn request_load(card: &Path, index: usize, now_unix: i64) -> Result<(), SaveError> {
+    if index >= SLOTS {
+        return Err(SaveError::Io(format!("there is no slot {index}")));
+    }
+    if card.as_os_str().is_empty() {
+        return Err(SaveError::NoCard);
+    }
+    let target = load_request_file(card);
+    let temporary = target.with_extension("tmp");
+    fs::write(&temporary, format!("slot={index}\ncreated_unix={now_unix}\n")).map_err(io)?;
+    fs::rename(&temporary, &target).map_err(io)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -492,6 +531,9 @@ mod tests {
         assert_eq!(slots[0].index, 0);
         assert_eq!(slots[0].file, "data0.bin");
         assert_eq!(slots[0].zone, "Athn02C");
+        // the record's third word is the play time (2902.96 s, 0:48:22) and the fourth the save point and difficulty
+        assert!((slots[0].play_seconds - 2902.958).abs() < 0.01);
+        assert_eq!((slots[0].save_point, slots[0].difficulty), (4, 0));
         // 2026-11-06 12:48:37 in Japan is 03:48:37 UTC
         assert_eq!(slots[0].modified_unix, 1_793_936_917);
     }
@@ -541,9 +583,30 @@ mod tests {
         let Ok(path) = std::env::var("GOW_TEST_CARD") else { return };
         let slots = read_card_file_slots(Path::new(&path));
         for slot in &slots {
-            eprintln!("slot {} {} zone {} modified {}", slot.index, slot.file, slot.zone, slot.modified_unix);
+            eprintln!(
+                "slot {} {} zone {} modified {} play {:.0} s save point {} difficulty {}",
+                slot.index,
+                slot.file,
+                slot.zone,
+                slot.modified_unix,
+                slot.play_seconds,
+                slot.save_point,
+                slot.difficulty
+            );
         }
         assert!(!slots.is_empty(), "the card has no God of War save");
+    }
+
+    #[test]
+    fn a_load_request_is_published_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let card = root.path().join("Mcd001.ps2");
+        request_load(&card, 3, 1_793_936_917).unwrap();
+        let text = fs::read_to_string(load_request_file(&card)).unwrap();
+        assert_eq!(text, "slot=3\ncreated_unix=1793936917\n");
+        assert!(!root.path().join("load-request.tmp").exists());
+        assert!(request_load(&card, 4, 0).is_err());
+        assert!(matches!(request_load(Path::new(""), 0, 0), Err(SaveError::NoCard)));
     }
 
     #[test]

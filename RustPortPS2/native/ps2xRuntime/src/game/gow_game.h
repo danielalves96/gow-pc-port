@@ -79,6 +79,11 @@ namespace gow_game
     // ---- saves (gow_save.cpp) -----------------------------------------------------------------------------------------
     void gowSaveWriteFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x22E800: observes a completed save
     uint32_t gowSaveCompletedCount(); // saves the game completed in this session
+    // loading a slot from the launcher or the F2 menu (gow_save_load.cpp); GOW_SAVE_LOAD=0 leaves it out
+    void gowSaveLoadPoll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);     // pad read, once per frame
+    void gowSaveLoadGameplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x21F3C8: gameplay frame
+    void gowSaveLoadPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);    // 0x21F638: pause menu frame
+    void gowSaveLoadMainMenu(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x21EBF8: main menu frame
 
     // ---- game logic rate (gow_logic_rate.cpp) ------------------------------------------------------------------------
     void gowLogicTimeStep(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);  // PC_LOGIC_FPS > 60 or GOW_HFPS_DIAG=1

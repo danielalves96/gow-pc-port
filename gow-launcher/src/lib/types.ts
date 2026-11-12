@@ -165,6 +165,22 @@ export interface CardSlot {
   modifiedUnix: number;
   /** The zone code the save stands in (`Athn02C`). */
   zone: string;
+  /** Play time in seconds. */
+  playSeconds: number;
+  /** The altar the save was made at (0 when unknown): names the place and the thumbnail in `SaveArt`. */
+  savePoint: number;
+  /** 0 to 3, easiest first. */
+  difficulty: number;
+}
+
+/** Names and thumbnails from the player's installed disc (`gow_core::save_art::SaveArt`); empty without it. */
+export interface SaveArt {
+  /** Save point -> name, as the game writes it. */
+  places: Record<string, string>;
+  /** Difficulty 0..3 -> name. */
+  difficulties: string[];
+  /** Save point -> `data:image/png;base64,...`. */
+  thumbnails: Record<string, string>;
 }
 
 /** A dated copy of the card the game made at an altar, or the player asked for. */

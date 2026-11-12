@@ -97,11 +97,25 @@ installation folder. **Setup wizard** reopens the installer.
 
 ### Saves
 
-Lists the God of War saves on the memory card (slot, zone code, when the game wrote it) and the **save history**: the dated
-copies the game makes at every altar. **Back up now** adds a manual copy. **Show saves** opens what a copy holds; **Restore**
-puts it in place of the card, only with the game closed, and keeps the card it replaces in the history (`Before a restore`).
-The page follows the history while the game runs. Zone codes are shown as the game stores them (`Athn02C`); names and
-thumbnails are not read from the game's data yet.
+Lists the God of War saves on the memory card as the game's own list shows them: the altar's thumbnail and name, the
+difficulty, the play time (`h:mm:ss`), the slot and when the game wrote it. The names and thumbnails are read from your
+installed disc (the extracted files next to `SCUS_973.99`, or the ISO); with a CHD, or before the game is installed, the
+page shows the zone code instead (`Athn02C`).
+
+**Load** goes to that save:
+
+- **With the game open** it asks first (progress since the last save is lost), then the game goes back to its main menu,
+  picks Load and that slot by itself, from gameplay, the pause menu, the main menu or the title screen. It takes a few
+  seconds; the game shows a notice when it starts and when a slot cannot be loaded.
+- **With the game closed** it starts the game, which opens on that save instead of the intro. A request the game has not
+  taken within ten minutes is dropped.
+
+Below it is the **save history**: the dated copies the game makes at every altar. **Back up now** adds a manual copy.
+**Show saves** opens what a copy holds; **Restore** puts it in place of the card, only with the game closed, and keeps the
+card it replaces in the history (`Before a restore`). The page follows the card and the history while the game runs.
+
+The same list is in the game: **F2** (the cheat menu), then **Tab** or **LB/RB** for the **Saves** page; press the load
+button twice to confirm. Under RetroAchievements Hardcore the F2 menu is off, and the launcher's Load is the way in.
 
 ### Controls
 

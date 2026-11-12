@@ -261,6 +261,26 @@ fn restore_save_backup(elf: String, id: String, state: State<'_, AppState>) -> R
     gow_core::saves::restore_backup(std::path::Path::new(&card), &id, running, unix_now()).map_err(|error| error.to_string())
 }
 
+/// The names of the save points and difficulties and the thumbnails of `points`, read from the player's installed disc
+/// (empty without it). Off the main thread: it reads about 4 MB.
+#[tauri::command]
+async fn save_art(state: State<'_, AppState>, points: Vec<u16>) -> Result<gow_core::save_art::SaveArt, String> {
+    let settings = state.snapshot();
+    let (elf, iso) = (settings.elf.clone(), settings.iso.clone());
+    tauri::async_runtime::spawn_blocking(move || gow_core::save_art::read_save_art(&elf, &iso, &points))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Asks the game for one slot of the card. While it runs it goes there from wherever it is; otherwise the request waits
+/// for the next start (the page then starts the game). Returns whether the game is running.
+#[tauri::command]
+fn load_save_slot(elf: String, index: usize, state: State<'_, AppState>) -> Result<bool, String> {
+    let card = game::memory_card_file(&elf);
+    gow_core::saves::request_load(std::path::Path::new(&card), index, unix_now()).map_err(|error| error.to_string())?;
+    Ok(state.game.lock().unwrap().is_some())
+}
+
 // ---------------------------------------------------------------------------------------------- playing
 
 #[derive(Serialize)]
@@ -1042,6 +1062,8 @@ pub fn run() {
             save_backup_slots,
             backup_card_now,
             restore_save_backup,
+            save_art,
+            load_save_slot,
             start_game,
             stop_game,
             is_game_running,

@@ -2,7 +2,7 @@
 // in-memory mock stands in, so the interface can be developed and checked without the Tauri shell.
 
 import type {
-  BuildActivity, Bootstrap, CardSlot, SaveBackup, DestinationValidation, GameFinished, GameStatus, GamepadCaptured, InstallOutcome,
+  BuildActivity, Bootstrap, CardSlot, SaveArt, SaveBackup, DestinationValidation, GameFinished, GameStatus, GamepadCaptured, InstallOutcome,
   ChdOutcome, ChdPlan, InstallProgress, IsoValidation, LiveState, PatchError, PatchOutcome, OptimizerSnapshot, PadDeviceList, RebuildState, Settings, TexturePackInfo, TexturePackOutcome, TexturePackProgress,
   UpdateMode, UpdateState, WizardInfo,
 } from './types';
@@ -51,6 +51,10 @@ export interface Api {
   saveBackupSlots(elf: string, id: string): Promise<CardSlot[]>;
   backupCardNow(elf: string): Promise<SaveBackup>; // rejects with a message
   restoreSaveBackup(elf: string, id: string): Promise<void>; // rejects with a message
+  /** Names and thumbnails of the save points from the installed disc (empty without it). */
+  saveArt(points: number[]): Promise<SaveArt>;
+  /** Asks the game for slot `index`; resolves to whether the game is running (if not, the request waits for its start). */
+  loadSaveSlot(elf: string, index: number): Promise<boolean>; // rejects with a message
   startGame(): Promise<void>; // rejects with a LaunchError
   stopGame(): Promise<void>;
   isGameRunning(): Promise<boolean>;
@@ -141,6 +145,8 @@ async function createTauriApi(): Promise<Api> {
     saveBackupSlots: (elf, id) => call('save_backup_slots', { elf, id }),
     backupCardNow: (elf) => call('backup_card_now', { elf }),
     restoreSaveBackup: (elf, id) => call('restore_save_backup', { elf, id }),
+    saveArt: (points) => call('save_art', { points }),
+    loadSaveSlot: (elf, index) => call('load_save_slot', { elf, index }),
     startGame: () => call('start_game'),
     stopGame: () => call('stop_game'),
     isGameRunning: () => call('is_game_running'),
@@ -299,6 +305,8 @@ export function createMockApi(
     profile?: 'building' | 'training' | 'finishing' | 'leftover';
     /** The demo of a rebuild in progress (`?build=` in a browser), see `demoActivity`. */
     build?: 'working' | 'quiet' | 'stuck';
+    /** The saves on the demo card and what the disc says about them. */
+    saves?: { slots: CardSlot[]; art: SaveArt };
   } = {},
 ): MockApi {
   const ready = options.ready ?? true;
@@ -367,11 +375,13 @@ export function createMockApi(
     detectPaths: async () => settings,
     detectedIso: async () => '',
     memoryCardFile: async (elf) => (elf ? elf.replace(/[\\/][^\\/]*$/, '') + '\\Mcd001.ps2' : ''),
-    cardSlots: async () => [],
+    cardSlots: async () => options.saves?.slots ?? [],
     saveBackups: async () => [],
     saveBackupSlots: async () => [],
     backupCardNow: async () => ({ id: '20260101-000000', created: '2026-01-01T00:00:00', createdUnix: 1767225600, source: 'manual', size: 0 }),
     restoreSaveBackup: async () => undefined,
+    saveArt: async () => options.saves?.art ?? { places: {}, difficulties: [], thumbnails: {} },
+    loadSaveSlot: async () => running,
     startGame: async () => {
       // The same refusals as `start_game`.
       if (profileStage !== 'none') throw { key: 'errorProfiling', detail: '' };
@@ -553,6 +563,22 @@ function mockUpdateFromAddress(value: string | null): UpdateState {
 
 let instance: Promise<Api> | undefined;
 
+/** The browser demo of the Saves page (`?saves=demo`): made-up places, a drawn thumbnail and one the disc has none for. */
+const demoThumbnail =
+  'data:image/svg+xml;base64,' +
+  btoa(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="80"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
+      '<stop offset="0" stop-color="#7a4a22"/><stop offset="1" stop-color="#e2b46a"/></linearGradient></defs>' +
+      '<rect width="128" height="80" fill="url(#g)"/><circle cx="96" cy="24" r="12" fill="#fff3c4"/></svg>',
+  );
+const demoSaves: { slots: CardSlot[]; art: SaveArt } = {
+  slots: [
+    { index: 0, file: 'data0.bin', modifiedUnix: 1793936917, zone: 'Demo01A', playSeconds: 2902.96, savePoint: 1, difficulty: 0 },
+    { index: 3, file: 'data1.bin', modifiedUnix: 1794513846, zone: 'Demo07C', playSeconds: 15_340, savePoint: 7, difficulty: 2 },
+  ],
+  art: { places: { '1': 'DEMO ALTAR', '7': 'ANOTHER DEMO ALTAR' }, difficulties: ['Easy', 'Normal', 'Hard', 'Very Hard'], thumbnails: { '1': demoThumbnail } },
+};
+
 /** The backend for this environment: Tauri when running inside the app, the mock in a browser. */
 export function getApi(): Promise<Api> {
   instance ??= isTauri
@@ -567,6 +593,7 @@ export function getApi(): Promise<Api> {
           profile: (new URLSearchParams(window.location.search).get('profile') ?? undefined) as
             | 'building' | 'training' | 'finishing' | 'leftover' | undefined,
           build: (new URLSearchParams(window.location.search).get('build') ?? undefined) as 'working' | 'quiet' | 'stuck' | undefined,
+          saves: new URLSearchParams(window.location.search).get('saves') === 'demo' ? demoSaves : undefined,
         }),
       );
   return instance;
