@@ -550,8 +550,30 @@ namespace ps2_gs_stage
         return running() && std::this_thread::get_id() == stage().common.threadId;
     }
 
+    namespace
+    {
+        ProcessFn &directProcess()
+        {
+            static ProcessFn fn;
+            return fn;
+        }
+    }
+
+    void setDirect(ProcessFn process)
+    {
+        directProcess() = std::move(process);
+    }
+
     void push(GifPathId path, const uint8_t *data, uint32_t size)
     {
+        // GOW-Port: without the stage thread (PS2X_GS_PIPELINE=0) the packet is processed at once: the ring was never
+        // allocated and the markers PS2Memory pushes used to crash the game at boot in that mode.
+        if (!running())
+        {
+            if (directProcess())
+                directProcess()(path, data, size);
+            return;
+        }
         if (stage().ring)
             ringPush(path, data, size);
         else

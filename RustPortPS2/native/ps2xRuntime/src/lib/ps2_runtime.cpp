@@ -763,6 +763,9 @@ bool PS2Runtime::syncCoreSubsystems()
         const char *pipeline = std::getenv("PS2X_GS_PIPELINE");
         return worker && worker[0] == '1' && !(pipeline && pipeline[0] == '0');
     }();
+    if (!gsPipeline) // GOW-Port: the markers PS2Memory pushes go straight to the frontend (gs_stage.h)
+        ps2_gs_stage::setDirect([this](GifPathId path, const uint8_t *data, uint32_t size)
+                                { m_gs.processGIFPacket(data, size, path); });
     if (gsPipeline)
         ps2_gs_stage::start([this](GifPathId path, const uint8_t *data, uint32_t size)
                             { m_gs.processGIFPacket(data, size, path); },
