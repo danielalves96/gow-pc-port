@@ -187,6 +187,25 @@ worker pushed its markers into a stage that was never started); fixed, it is now
 the EE, the VU1 and the GL driver sharing two cores: the VU1 kernels in SIMD (design note below), and the GL thread's own
 cost (`addVertex`, draw submission) are the next candidates.
 
+### Rounds 3 to 5 (2026-11-12): what did not pay
+
+Each measured on 2 cores the same way (3 alternating pairs after a warm-up run, against the build before it); kept only
+when it won:
+
+| Change | Result | Kept |
+|---|---|---|
+| GL state shadow (two thirds of the GL state calls elided) and a vertex ring buffer | 54.9 FPS without vs 54.5 with | no (reverted) |
+| Fused VU1 two-block cycles with the VU state in locals (exact, cycle-exact) | 55.5 without vs 55.0 with | no (reverted) |
+| Native VBlank wait (the hottest EE function is a busy wait) | 54.9 with vs 54.4 without: noise | no (reverted) |
+| EE codegen: lean pc for delay-slot entries and VU0 ops, grouped RAM range checks | 54.1 -> 54.4, frames over 50 ms 14 -> 8 | yes |
+| EE codegen: constant propagation through calls by pointer, direct call dispatch (-20 % static instructions in the hottest function) | 54.6 -> 53.9 | no (not merged) |
+
+A 2-core run with `PS2X_GS_WORKER_DIAG=1` shows the EE thread busy ~97 % of the time with no idle wait: two cores are
+saturated by the EE, the VU1 worker (which now also runs the GS frontend) and the GL thread with its driver. Removing
+instructions here and there no longer moves the frame rate; the next step is structural: less work on the EE critical path
+(profiling the recompiled game code by function on a quiet 2-core run with a sampler that does not compete for the two
+cores), the VU1 kernels in SIMD across vertices (design note below), or moving work off the two busiest threads.
+
 **Design note: what is left for the VU1** (it stays above ~4 ms per frame on 4 cores):
 
 - *Kernel specialization* (step 3 proper): hand-written or generated SIMD versions of the four vertex kernels that process 4
