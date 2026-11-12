@@ -202,7 +202,12 @@ movz_low64 = false
     .unwrap();
     assert!(!off.codegen.movz_low64, "a switch written in the section wins over the mode");
     assert!(
-        off.codegen.restrict_ctx && off.codegen.lean_pc && off.codegen.vu0_macro_fixes,
+        off.codegen.restrict_ctx
+            && off.codegen.lean_pc
+            && off.codegen.lean_cop2
+            && off.codegen.delay_slot_labels
+            && off.codegen.ram_groups
+            && off.codegen.vu0_macro_fixes,
         "the other switches keep the mode's value"
     );
 
@@ -212,13 +217,23 @@ movz_low64 = false
 mode = \"gow\"
 restrict_ctx = false
 lean_pc = false
+lean_cop2 = false
+delay_slot_labels = false
+ram_groups = false
 vu0_macro_fixes = false
 "
         ),
         "test",
     )
     .unwrap();
-    assert!(!plain.codegen.restrict_ctx && !plain.codegen.lean_pc && !plain.codegen.vu0_macro_fixes);
+    assert!(
+        !plain.codegen.restrict_ctx
+            && !plain.codegen.lean_pc
+            && !plain.codegen.lean_cop2
+            && !plain.codegen.delay_slot_labels
+            && !plain.codegen.ram_groups
+            && !plain.codegen.vu0_macro_fixes
+    );
     let (plain_again, _) = RecompilerConfig::from_toml_str(&plain.to_toml_string().unwrap(), "test").unwrap();
     assert_eq!(plain_again.codegen, plain.codegen, "the switches survive a save");
 

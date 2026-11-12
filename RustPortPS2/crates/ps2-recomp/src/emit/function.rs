@@ -9,8 +9,9 @@ use std::fmt::Write as _;
 use ps2_r5900::opcodes::*;
 use ps2_r5900::Instruction;
 
-use crate::emit::lean::lean_statement;
+use crate::emit::lean::{lean_statement, Lean};
 use crate::emit::locals::{build_body, Chunk, ChunkKind};
+use crate::emit::ramgroup::{goto_targets, RamGroups};
 use crate::flow::emitter::ControlFlowEmitter;
 use crate::generator::{CodeGenerator, GenerationError};
 use crate::gif_dma::{
@@ -69,15 +70,16 @@ pub fn emit_function(
         sanitized_name = format!("Errorfunc_{:x}", function.start);
     }
 
-    // GOW-Port (decision D2): `[codegen] restrict_ctx` and `lean_pc` (emit/lean.rs). A function with a branch whose
-    // delay slot is itself a branch target keeps every pc store: the delay-slot entry tests `ctx->pc` in the normal flow.
+    // GOW-Port (decision D2): `[codegen] restrict_ctx` and `lean_pc` (emit/lean.rs). Without `delay_slot_labels`, a function
+    // with a branch whose delay slot is itself a branch target keeps every pc store: its delay-slot entry tests `ctx->pc`.
     let codegen = cg.codegen();
     let restrict = if codegen.restrict_ctx { "__restrict " } else { "" };
-    let lean = codegen.lean_pc
-        && !codegen.register_locals
-        && !instructions
-            .iter()
-            .any(|inst| inst.has_delay_slot && analysis.entry_points.contains(&inst.address.wrapping_add(4)));
+    let delay_slot_entry = instructions
+        .iter()
+        .any(|inst| inst.has_delay_slot && analysis.entry_points.contains(&inst.address.wrapping_add(4)));
+    let lean: Option<Lean> =
+        (codegen.lean_pc && !codegen.register_locals && (codegen.delay_slot_labels || !delay_slot_entry))
+            .then_some(Lean { cop2: codegen.lean_cop2, delay_slot_labels: codegen.delay_slot_labels });
     let _ = writeln!(ss, "void {sanitized_name}(uint8_t* rdram, R5900Context* {restrict}ctx, PS2Runtime *runtime) {{");
     ss.push_str("#ifdef PS2_FUNCTION_LOG_TRACKER\n");
     let _ = writeln!(ss, "    PS_LOG_ENTRY(\"{sanitized_name}\");");
@@ -96,11 +98,14 @@ pub fn emit_function(
     let _ = writeln!(head, "    ctx->pc = 0x{:x}u;", function.start);
     head.push('\n');
     let mut chunks: Vec<Chunk> = Vec::new();
-    let mut push = |kind: ChunkKind, text: String| {
+    fn push_chunk(chunks: &mut Vec<Chunk>, kind: ChunkKind, text: String) {
         if !text.is_empty() {
             chunks.push(Chunk { kind, text });
         }
-    };
+    }
+    // GOW-Port: `ram_groups` (emit/ramgroup.rs); the labels a `goto` can reach end a group.
+    let mut groups = (codegen.ram_groups && !codegen.register_locals).then(RamGroups::new);
+    let reachable_labels = goto_targets(instructions, analysis.jump_table_targets.values().flatten().copied());
 
     let mut last_instruction_was_control_flow = false;
     let emit_comments = cg.emit_instruction_comments();
@@ -112,6 +117,9 @@ pub fn emit_function(
 
         let mut label = String::new();
         if analysis.entry_points.contains(&inst.address) {
+            if let Some(groups) = groups.as_mut().filter(|_| reachable_labels.contains(&inst.address)) {
+                groups.close_all(&mut chunks);
+            }
             constant_registers.clear();
             let _ = writeln!(label, "label_{:x}:", inst.address);
         }
@@ -124,9 +132,12 @@ pub fn emit_function(
             }
             label.push('\n');
         }
-        push(ChunkKind::Label, label);
+        push_chunk(&mut chunks, ChunkKind::Label, label);
 
         if inst.has_delay_slot {
+            if let Some(groups) = groups.as_mut() {
+                groups.close_all(&mut chunks);
+            }
             let has_decoded_delay_slot =
                 i + 1 < instructions.len() && instructions[i + 1].address == inst.address.wrapping_add(4);
 
@@ -138,8 +149,12 @@ pub fn emit_function(
                 &synthetic_delay_slot
             };
 
-            if has_decoded_delay_slot && analysis.entry_points.contains(&delay_slot.address) {
-                push(ChunkKind::Label, format!("label_{:x}:\n", delay_slot.address));
+            // (`delay_slot_labels`: the branch emitter puts the label in front of the delay-slot entry block itself)
+            if has_decoded_delay_slot
+                && analysis.entry_points.contains(&delay_slot.address)
+                && !lean.is_some_and(|lean| lean.delay_slot_labels)
+            {
+                push_chunk(&mut chunks, ChunkKind::Label, format!("label_{:x}:\n", delay_slot.address));
             }
 
             if gif_dma_kick_plan.valid
@@ -148,13 +163,15 @@ pub fn emit_function(
                 && has_decoded_delay_slot
             {
                 let override_code = gif_dma_delay_slot_override(delay_slot, &gif_dma_kick_plan, emit_comments);
-                push(
+                push_chunk(
+                    &mut chunks,
                     ChunkKind::Branch,
                     ControlFlowEmitter::new(cg, inst, delay_slot, function, &analysis, override_code).lean(lean).emit(),
                 );
                 gif_dma_kick_plan = GifDmaKickPlan::default();
             } else {
-                push(
+                push_chunk(
+                    &mut chunks,
                     ChunkKind::Branch,
                     ControlFlowEmitter::new(cg, inst, delay_slot, function, &analysis, String::new()).lean(lean).emit(),
                 );
@@ -171,6 +188,9 @@ pub fn emit_function(
             }
 
             if gif_dma_kick_plan.suppresses(i) {
+                if let Some(groups) = groups.as_mut() {
+                    groups.close_all(&mut chunks);
+                }
                 let slot = gif_dma_kick_plan.slot_for(i);
                 let mut other = String::new();
                 emit_gif_dma_capture(&mut other, &gif_dma_kick_plan, slot, "    ");
@@ -180,7 +200,7 @@ pub fn emit_function(
                     let _ = writeln!(other, "    {}", gif_dma_kick_call(&gif_dma_kick_plan));
                     gif_dma_kick_plan = GifDmaKickPlan::default();
                 }
-                push(ChunkKind::Other, other);
+                push_chunk(&mut chunks, ChunkKind::Other, other);
 
                 update_constant_registers(inst, &mut constant_registers);
                 i += 1;
@@ -190,7 +210,7 @@ pub fn emit_function(
             let mut statement = String::new();
             let memory_hint = resolve_memory_access_hint(inst, &constant_registers);
             let translation = cg.translate_instruction_with_hint(inst, memory_hint);
-            match lean.then(|| lean_statement(inst, &translation)).flatten() {
+            match lean.and_then(|lean| lean_statement(inst, &translation, lean)) {
                 Some(lean_text) => {
                     let _ = write!(statement, "    {lean_text}");
                 }
@@ -203,12 +223,30 @@ pub fn emit_function(
                 let _ = write!(statement, " // MMIO: 0x{:x}", inst.mmio_address);
             }
             statement.push('\n');
-            push(ChunkKind::Instruction, statement);
+            if let Some(groups) = groups.as_mut() {
+                groups.observe(inst, &translation, &mut chunks);
+            }
+            push_chunk(&mut chunks, ChunkKind::Instruction, statement);
+            if let Some(groups) = groups.as_mut() {
+                groups.settle(&translation, &mut chunks);
+            }
 
             update_constant_registers(inst, &mut constant_registers);
         }
 
         i += 1;
+    }
+
+    if let Some(groups) = groups.as_mut() {
+        groups.close_all(&mut chunks);
+        // The groups are closed at every label a `goto` can reach: a goto into one would run members without their check.
+        if let Some((target, first, last)) = groups.goto_into_a_group(&chunks) {
+            panic!(
+                "{}: goto label_{target:x} lands inside the RAM group 0x{first:x}..0x{last:x} (emit/ramgroup.rs)",
+                function.name
+            );
+        }
+        head.insert_str(0, groups.declarations());
     }
 
     // Fallthrough with no terminating branch: publish the next PC so the EE dispatcher does not re-enter this function.

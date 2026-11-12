@@ -10,7 +10,7 @@ use ps2_r5900::opcodes::*;
 use ps2_r5900::Instruction;
 
 use crate::calls::{resolve_stub_name, resolve_syscall_name};
-use crate::emit::lean::lean_statement;
+use crate::emit::lean::{lean_statement, Lean};
 use crate::flow::analyzer::AnalysisResult;
 use crate::generator::CodeGenerator;
 use crate::translate::control_flow::is_guest_nop;
@@ -37,7 +37,7 @@ pub struct ControlFlowEmitter<'a> {
     delay_slot_override: String,
     out: String,
     /// GOW-Port: `[codegen] lean_pc` for this function (emit/lean.rs).
-    lean: bool,
+    lean: Option<Lean>,
 }
 
 impl<'a> ControlFlowEmitter<'a> {
@@ -49,13 +49,17 @@ impl<'a> ControlFlowEmitter<'a> {
         analysis: &'a AnalysisResult,
         delay_slot_override: String,
     ) -> Self {
-        Self { generator, branch, delay_slot, analysis, delay_slot_override, out: String::new(), lean: false }
+        Self { generator, branch, delay_slot, analysis, delay_slot_override, out: String::new(), lean: None }
     }
 
     /// GOW-Port: `[codegen] lean_pc`: leave out the pc stores nothing can read (emit/lean.rs).
-    pub fn lean(mut self, lean: bool) -> Self {
+    pub fn lean(mut self, lean: Option<Lean>) -> Self {
         self.lean = lean;
         self
+    }
+
+    fn is_lean(&self) -> bool {
+        self.lean.is_some()
     }
 
     fn branch_pc(&self) -> u32 {
@@ -137,9 +141,9 @@ impl<'a> ControlFlowEmitter<'a> {
         }
 
         // GOW-Port: lean pc: a delay slot that cannot reach the runtime needs no pc / delay-slot state.
-        if self.lean && self.delay_slot_override.is_empty() {
+        if let Some(lean) = self.lean.filter(|_| self.delay_slot_override.is_empty()) {
             let translation = self.generator.translate_instruction(self.delay_slot);
-            if let Some(lean_text) = lean_statement(self.delay_slot, &translation) {
+            if let Some(lean_text) = lean_statement(self.delay_slot, &translation, lean) {
                 if self.generator.emit_instruction_comments() {
                     let _ = write!(self.out, "{indent}// 0x{:x}: 0x{:x}", self.delay_slot.address, self.delay_slot.raw);
                     let disassembly = self.delay_slot.disassembly();
@@ -177,7 +181,17 @@ impl<'a> ControlFlowEmitter<'a> {
             return;
         }
 
-        let _ = writeln!(self.out, "    if (ctx->pc == 0x{:X}u) {{", self.delay_pc());
+        // GOW-Port: `delay_slot_labels`: the entry is its own block behind its own label (label_<delay slot>, which every
+        // goto and the resume switch already name), and the normal flow jumps over it. Nothing tests `ctx->pc`, so the
+        // function can leave its pc stores out (lean_pc). The text of the entry is the same as the `if` body.
+        let own_label = self.lean.is_some_and(|lean| lean.delay_slot_labels);
+        if own_label {
+            let _ = writeln!(self.out, "    goto label_body_{:x};", self.branch_pc());
+            let _ = writeln!(self.out, "label_{:x}:", self.delay_pc());
+            self.out.push_str("    {\n");
+        } else {
+            let _ = writeln!(self.out, "    if (ctx->pc == 0x{:X}u) {{", self.delay_pc());
+        }
         self.emit_delay_slot("        ");
         let _ = writeln!(self.out, "        ctx->pc = 0x{:X}u;", self.fallthrough_pc());
 
@@ -188,12 +202,15 @@ impl<'a> ControlFlowEmitter<'a> {
         }
 
         self.out.push_str("    }\n");
+        if own_label {
+            let _ = writeln!(self.out, "label_body_{:x}:", self.branch_pc());
+        }
     }
 
     fn emit_internal_target(&mut self, target: u32, source_pc: u32, indent: &str) {
         let back_edge = target <= source_pc && !self.is_call_like_edge();
         // GOW-Port: lean pc: only a back edge's checkpoint can read the pc (it resumes at the target).
-        if !self.lean || back_edge {
+        if !self.is_lean() || back_edge {
             let _ = writeln!(self.out, "{indent}ctx->pc = 0x{target:X}u;");
         }
         if back_edge {
@@ -354,7 +371,7 @@ impl<'a> ControlFlowEmitter<'a> {
 
         // GOW-Port: lean pc: a call's dispatch, and the relocation stub path, store the pc themselves. A jump keeps it: a
         // tail call enters the callee directly, and the callee's resume switch reads it.
-        if !self.lean || kind != StaticBranchKind::Call {
+        if !self.is_lean() || kind != StaticBranchKind::Call {
             let _ = writeln!(self.out, "    ctx->pc = 0x{target:X}u;");
         }
 
@@ -517,7 +534,7 @@ impl<'a> ControlFlowEmitter<'a> {
 
     fn emit_final_fallthrough(&mut self) {
         // GOW-Port: lean pc: nothing reads the pc before the next instruction stores what it needs.
-        if self.lean {
+        if self.is_lean() {
             return;
         }
         let _ = writeln!(self.out, "    ctx->pc = 0x{:X}u;", self.fallthrough_pc());
@@ -530,7 +547,7 @@ impl<'a> ControlFlowEmitter<'a> {
         let is_static_jump = b.opcode == OPCODE_J || b.opcode == OPCODE_JAL;
         let is_register_jump = b.opcode == OPCODE_SPECIAL && (b.function == SPECIAL_JR || b.function == SPECIAL_JALR);
         // GOW-Port: lean pc: a branch's own pc is read by nothing but the fallback (an instruction translated as such).
-        if !self.lean || !(is_static_jump || is_register_jump || b.is_branch) {
+        if !self.is_lean() || !(is_static_jump || is_register_jump || b.is_branch) {
             let _ = writeln!(self.out, "    ctx->pc = 0x{:X}u;", self.branch_pc());
         }
 

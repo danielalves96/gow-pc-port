@@ -8,6 +8,15 @@
 use ps2_r5900::opcodes::*;
 use ps2_r5900::Instruction;
 
+/// What the lean mode of one function includes (the `[codegen]` switches under `lean_pc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Lean {
+    /// `lean_cop2`: VU0 macro-mode instructions without a runtime call drop their pc store.
+    pub cop2: bool,
+    /// `delay_slot_labels`: a delay-slot entry has its own label instead of a test of `ctx->pc` (flow/emitter.rs).
+    pub delay_slot_labels: bool,
+}
+
 /// R5900 instructions that neither trap nor call into the runtime: plain register arithmetic, moves and logic. ADD /
 /// SUB / DADD / DSUB (overflow traps), SYSCALL, BREAK, SYNC and the trap instructions are not here.
 pub fn cannot_observe_pc(inst: &Instruction) -> bool {
@@ -53,7 +62,7 @@ fn uses_checked_access(text: &str) -> bool {
 
 /// The statement for `inst` without a pc store, or `None` when it must keep it. `translation` is the translated
 /// instruction alone (no comment, no pc store).
-pub fn lean_statement(inst: &Instruction, translation: &str) -> Option<String> {
+pub fn lean_statement(inst: &Instruction, translation: &str, lean: Lean) -> Option<String> {
     if reaches_runtime(translation) {
         return None;
     }
@@ -67,7 +76,15 @@ pub fn lean_statement(inst: &Instruction, translation: &str) -> Option<String> {
         }
         return Some(translation.to_owned());
     }
-    cannot_observe_pc(inst).then(|| translation.to_owned())
+    (cannot_observe_pc(inst) || (lean.cop2 && is_vu0_register_op(inst))).then(|| translation.to_owned())
+}
+
+/// A COP2 (VU0 macro mode) instruction that is not a memory access or a branch: the register transfers (QMFC2, QMTC2,
+/// CFC2, CTC2) and the arithmetic. They only touch `ctx->vu0_*`, `ctx->vi` and the GPRs; what could reach the runtime
+/// (VCALLMS, VILWR / VISWR, which use `runtime->memory()`) shows in the text and is filtered by `reaches_runtime`. A
+/// translation the recompiler could not handle is a `throw`, which `reaches_runtime` filters as well.
+fn is_vu0_register_op(inst: &Instruction) -> bool {
+    inst.opcode == OPCODE_COP2 && !(inst.is_load || inst.is_store || inst.is_mmio || inst.is_branch || inst.is_jump)
 }
 
 #[cfg(test)]
@@ -82,28 +99,35 @@ mod tests {
     fn pure_arithmetic_drops_its_pc_store() {
         // addiu $sp, $sp, -0x100
         let inst = decode(0x27bd_ff00);
-        assert_eq!(lean_statement(&inst, "SET_GPR_S32(ctx, 29, 1);").as_deref(), Some("SET_GPR_S32(ctx, 29, 1);"));
+        assert_eq!(
+            lean_statement(&inst, "SET_GPR_S32(ctx, 29, 1);", Lean::default()).as_deref(),
+            Some("SET_GPR_S32(ctx, 29, 1);")
+        );
     }
 
     #[test]
     fn a_ram_access_passes_its_pc_to_the_slow_path() {
         // lw $a1, -0x4218($s2)
         let inst = decode(0x8e45_bde8);
-        let lean = lean_statement(&inst, "SET_GPR_S32(ctx, 5, (int32_t)READ32(ADD32(GPR_U32(ctx, 18), 1)));").unwrap();
+        let lean =
+            lean_statement(&inst, "SET_GPR_S32(ctx, 5, (int32_t)READ32(ADD32(GPR_U32(ctx, 18), 1)));", Lean::default())
+                .unwrap();
         assert!(lean.starts_with("{ constexpr uint32_t ps2AccessPc = 0x100000u; "), "{lean}");
-        let constant = lean_statement(&inst, "SET_GPR_S32(ctx, 5, (int32_t)FAST_READ32(0x29BDE8u));").unwrap();
+        let constant =
+            lean_statement(&inst, "SET_GPR_S32(ctx, 5, (int32_t)FAST_READ32(0x29BDE8u));", Lean::default()).unwrap();
         assert!(!constant.contains("ps2AccessPc"), "a constant RAM address has no slow path: {constant}");
     }
 
     #[test]
     fn runtime_calls_and_traps_keep_it() {
         let lw = decode(0x8e45_bde8);
-        assert!(lean_statement(&lw, "SET_GPR_S32(ctx, 5, runtime->Load32(rdram, ctx, 0x10003000u));").is_none());
+        assert!(lean_statement(&lw, "SET_GPR_S32(ctx, 5, runtime->Load32(rdram, ctx, 0x10003000u));", Lean::default())
+            .is_none());
         // add $v0, $a0, $a1 (overflow trap)
         let add = decode(0x0085_1020);
-        assert!(lean_statement(&add, "SET_GPR_S32(ctx, 2, 0);").is_none());
+        assert!(lean_statement(&add, "SET_GPR_S32(ctx, 2, 0);", Lean::default()).is_none());
         // syscall
         let syscall = decode(0x0000_000c);
-        assert!(lean_statement(&syscall, "SET_GPR_S32(ctx, 2, 0);").is_none());
+        assert!(lean_statement(&syscall, "SET_GPR_S32(ctx, 2, 0);", Lean::default()).is_none());
     }
 }

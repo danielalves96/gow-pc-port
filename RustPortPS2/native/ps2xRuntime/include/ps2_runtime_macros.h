@@ -644,6 +644,48 @@ static inline bool Ps2FastStore(uint8_t *rdram, uint32_t addr, const T &value)
 #define WRITE64(addr, val) PS2_GUEST_WRITE(uint64_t, 64, (uint32_t)(addr), (val))
 #define WRITE128(addr, val) PS2_GUEST_WRITE(__m128i, 128, (uint32_t)(addr) & ~0xFu, (val))
 
+// GOW-Port ([codegen] ram_groups, recompiler emit/ramgroup.rs): the accesses of a straight-line run that use the same base
+// register share one range check, made by the first of them: gf = ((base + omin) & 0xDFFFFFFF) + dmax < PS2_FAST_RAM_LIMIT,
+// gm = that masked address. With gf set every member is a plain load / store at rdram + gm + d (d = its offset - omin),
+// which is what its own READ / WRITE would have done; without it the member runs the original macro on its own address
+// (scratchpad, I/O, VU memory, the last 16 bytes of RAM, an entry in the middle of the run through the switch at the top
+// of the function: the flags start false).
+template <typename T>
+static inline T Ps2GroupLoad(const uint8_t *rdram, uint32_t offset)
+{
+    T value;
+    std::memcpy(&value, rdram + offset, sizeof(T));
+    return value;
+}
+
+template <typename T>
+static inline void Ps2GroupStore(uint8_t *rdram, uint32_t offset, const T &value)
+{
+    std::memcpy(rdram + offset, &value, sizeof(T));
+}
+
+#define GREAD8(gf, gm, d, addr) (PS2_LIKELY(gf) ? Ps2GroupLoad<uint8_t>(rdram, (gm) + (d)) : READ8(addr))
+#define GREAD16(gf, gm, d, addr) (PS2_LIKELY(gf) ? Ps2GroupLoad<uint16_t>(rdram, (gm) + (d)) : READ16(addr))
+#define GREAD32(gf, gm, d, addr) (PS2_LIKELY(gf) ? Ps2GroupLoad<uint32_t>(rdram, (gm) + (d)) : READ32(addr))
+#define GREAD64(gf, gm, d, addr) (PS2_LIKELY(gf) ? Ps2GroupLoad<uint64_t>(rdram, (gm) + (d)) : READ64(addr))
+#define GREAD128(gf, gm, d, addr) \
+    (PS2_LIKELY(gf) ? Ps2GroupLoad<__m128i>(rdram, ((gm) + (d)) & ~0xFu) : READ128(addr))
+
+#define PS2_GROUP_WRITE(T, N, gf, gm, d, addr, val, offsetExpr)          \
+    do                                                                   \
+    {                                                                    \
+        if (PS2_LIKELY(gf))                                              \
+            Ps2GroupStore<T>(rdram, (offsetExpr), (T)(val));             \
+        else                                                             \
+            WRITE##N(addr, val);                                         \
+    } while (0)
+
+#define GWRITE8(gf, gm, d, addr, val) PS2_GROUP_WRITE(uint8_t, 8, gf, gm, d, addr, val, (gm) + (d))
+#define GWRITE16(gf, gm, d, addr, val) PS2_GROUP_WRITE(uint16_t, 16, gf, gm, d, addr, val, (gm) + (d))
+#define GWRITE32(gf, gm, d, addr, val) PS2_GROUP_WRITE(uint32_t, 32, gf, gm, d, addr, val, (gm) + (d))
+#define GWRITE64(gf, gm, d, addr, val) PS2_GROUP_WRITE(uint64_t, 64, gf, gm, d, addr, val, (gm) + (d))
+#define GWRITE128(gf, gm, d, addr, val) PS2_GROUP_WRITE(__m128i, 128, gf, gm, d, addr, val, ((gm) + (d)) & ~0xFu)
+
 // Packed Compare Greater Than (PCGT)
 #define PS2_PCGTW(a, b) _mm_cmpgt_epi32((__m128i)(a), (__m128i)(b))
 #define PS2_PCGTH(a, b) _mm_cmpgt_epi16((__m128i)(a), (__m128i)(b))
