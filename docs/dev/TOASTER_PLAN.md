@@ -236,6 +236,7 @@ when it won:
 | Native VBlank wait (the hottest EE function is a busy wait) | 54.9 with vs 54.4 without: noise | no (reverted) |
 | EE codegen: lean pc for delay-slot entries and VU0 ops, grouped RAM range checks | 54.1 -> 54.4, frames over 50 ms 14 -> 8 | yes |
 | EE codegen: constant propagation through calls by pointer, direct call dispatch (-20 % static instructions in the hottest function) | 54.6 -> 53.9 | no (not merged) |
+| VU1 block chaining (blocks tail-call the next one with `preserve_none`, ~140 -> ~95 instructions of dispatch per block; exact, cycle-exact) | replay bench median 11.33 -> 11.59 ms | no (not merged) |
 
 A 2-core run with `PS2X_GS_WORKER_DIAG=1` shows the EE thread busy ~97 % of the time with no idle wait: two cores are
 saturated by the EE, the VU1 worker (which now also runs the GS frontend) and the GL thread with its driver. Removing
