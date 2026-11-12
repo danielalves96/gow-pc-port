@@ -67,6 +67,7 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 | `PS2X_IOP_NATIVE`, `PS2X_IOP_NATIVE_STATS` | Native IOP module use and its hit statistics |
 | `PS2X_THREAD_PRIORITY=0\|1` | The GL thread runs above normal priority by default only when the process may use 4 or more logical processors (its affinity mask); `0`/`1` force it off/on |
 | `GOW_GS_STAGE_SPIN_US=<us>` | How long the GS stage spins before sleeping when idle. Default 50 with 4 or more usable processors, 0 below (on 2 cores the spin took the CPU the EE and VU1 need) |
+| `PS2X_GS_PIPELINE=0\|1` | The GS frontend on its own stage thread (default with 4 or more usable processors) or on the GS worker (default below) |
 | `GOW_HOST_WAIT_FRACTION=yield\|sleep` | How the EE waits the last fraction of a millisecond before a pacing deadline: `yield` (default with 4 or more usable processors: precise, keeps the thread runnable) or `sleep` (default below: a high-resolution timer, leaves the CPU to the other threads) |
 
 ## Input and features
