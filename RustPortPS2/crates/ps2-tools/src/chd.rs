@@ -267,12 +267,12 @@ impl Huffman {
         small.lengths[0] = bits.read(3) as u8;
         let start = bits.read(3) as usize + 1;
         let mut count = 0;
-        for index in 1..24 {
+        for (index, length) in small.lengths.iter_mut().enumerate().skip(1) {
             if index < start || count == 7 {
-                small.lengths[index] = 0;
+                *length = 0;
             } else {
                 count = bits.read(3);
-                small.lengths[index] = if count == 7 { 0 } else { count as u8 };
+                *length = if count == 7 { 0 } else { count as u8 };
             }
         }
         small.build()?;
