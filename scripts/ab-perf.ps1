@@ -3,10 +3,14 @@
 #   scripts\ab-perf.ps1 -ExeA <old gow-2005.exe> -ExeB <new gow-2005.exe> -Elf <SCUS_973.99> -EnvFile <gow-cli env output>
 #                       [-WorkDir <folder>] [-Pairs 4] [-Seconds 150] [-WarmupSeconds 30] [-PadScript '5:start,12:x,...']
 #                       [-Set 'NAME=VALUE', ...] [-SetA 'NAME=VALUE', ...] [-SetB 'NAME=VALUE', ...] [-OutDir <folder>]
-#                       [-Cores 4] [-WarmupRunSeconds 90]
+#                       [-Cores 4 | -AffinityMask 0x5] [-WarmupRunSeconds 90]
 #
 # -WarmupRunSeconds N first runs A for N seconds and discards it (0: none). Without it the first run of a series met a
 # cool machine and was the fastest by far (2 cores: 55-59 FPS against ~40 for the next runs), and it is always variant A.
+#
+# -AffinityMask <hex> pins the game to exactly those logical processors instead of -Cores. With SMT the first N logical
+# processors are N/2 physical cores (Windows numbers the two threads of a core next to each other: on a 6-core/12-thread
+# CPU -Cores 2 is one physical core); 0x5 gives two threads on two different cores, a dual core without SMT.
 #
 # -Cores N pins the game to the first N logical processors, to approximate a weaker PC (the target of most performance
 # work); 0 (the default) leaves the affinity alone.
@@ -40,7 +44,8 @@ param(
     [string[]]$SetB = @(),
     [string]$OutDir = '',
     [int]$Cores = 0,
-    [int]$WarmupRunSeconds = 90
+    [int]$WarmupRunSeconds = 90,
+    [string]$AffinityMask = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -127,7 +132,8 @@ function Invoke-Run([string]$label, [string]$exe, [int]$index) {
         Write-Host ("[{0}] run {1} ({2}): {3} s" -f (Get-Date -Format 'HH:mm:ss'), $index, $label, $Seconds)
         $process = Start-Process -FilePath $exe -ArgumentList ('"' + $Elf + '"') -WorkingDirectory $WorkDir -PassThru `
             -RedirectStandardError $log -RedirectStandardOutput ($log + '.out')
-        if ($Cores -gt 0) { $process.ProcessorAffinity = [IntPtr]([int64](1 -shl $Cores) - 1) }
+        if ($AffinityMask) { $process.ProcessorAffinity = [IntPtr]([Convert]::ToInt64($AffinityMask.Replace('0x', ''), 16)) }
+        elseif ($Cores -gt 0) { $process.ProcessorAffinity = [IntPtr]([int64](1 -shl $Cores) - 1) }
     }
     finally {
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
