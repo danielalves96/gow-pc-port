@@ -176,9 +176,16 @@ and was by far the fastest, always variant A).
 | `d01ed93` (start) | 40.0 | 21.4 | 75.8 ms | 392 | 117-163 |
 | `6d19eca` (round 2) | 49.8 | 32.1 | 37.1 ms | 186 | 1 (start-up) |
 | `aa33f76` (+ the low-core policies) | 53.9 (vs 48.1 for `6d19eca` in the same series) | 38.9 | 32.0 ms | 81 | 1 |
+| `f9dbc76` (+ refreshed shipped profile, GS frontend on the worker below 4 processors), same series as the base | 53.4 (base 38.9) | 40.6 (base 20.2) | 30.1 ms (base 78.0) | 17 (base 426) | 1-2 (base 143-187) |
 
-Internal scale 1x or 2x instead of 4x changes nothing on 2 cores (CPU-bound). Four cores keep a steady 60 FPS; round 2 took
-another ~19 % off the GS thread there.
+Internal scale 1x or 2x instead of 4x changes nothing on 2 cores (CPU-bound). Four cores keep a steady 60 FPS; against the
+base in the same final series the VU1 thread went 6.95 -> 5.78 ms per frame and the GS 5.92 -> 2.68 (EE about the same).
+The full local training (Optimize now) adds ~3 % on 2 cores. `PS2X_GS_PIPELINE=0` crashed at boot before this round (the
+worker pushed its markers into a stage that was never started); fixed, it is now the default below 4 processors.
+
+**Still open:** 2 cores average ~53-54 FPS, not 60 (worst 5 s window ~40 FPS, almost no hitches). What is left is real work on
+the EE, the VU1 and the GL driver sharing two cores: the VU1 kernels in SIMD (design note below), and the GL thread's own
+cost (`addVertex`, draw submission) are the next candidates.
 
 **Design note: what is left for the VU1** (it stays above ~4 ms per frame on 4 cores):
 
