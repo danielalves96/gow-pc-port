@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/gow-core", "crates/gow-cli", "crates/fake-runner", "src-tauri"]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0-rc"
 edition = "2021"
 # GPL-3.0-only: the launcher links the Rust port of PS2Recomp, which derives from the GPLv3 C++ tree.
 license = "GPL-3.0-only"

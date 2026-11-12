@@ -74,15 +74,15 @@ Last reviewed: October 2026, against the code in this repository.
   [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for what to collect.
 - **Blocky picture after saving (issue #34):** right after a save, a VU1 command stream reached a reserved VIFcode in every
   frame (`[vif1] unhandled VIFcode opcode=25`). A stream that stops while PATH3 is masked never unmasks it, so texture
-  uploads stayed queued until a restart, the likely cause of the picture; since 0.3.4 they are released. Not verified in
+  uploads stayed queued until a restart, the likely cause of the picture; since 0.4.0 they are released. Not verified in
   game yet. Which command misaligns the stream is not known: the first faults now print the commands before them.
 - **Character stuck after the sixth Gorgon Eye (issue #35):** reproduced by one player many times; the log just stops,
-  with no hang report. Since 0.3.4 a crash leaves a `[gow-crash]` line and the log is no longer cut at exit. Not fixed.
+  with no hang report. Since 0.4.0 a crash leaves a `[gow-crash]` line and the log is no longer cut at exit. Not fixed.
 - **Permanent freeze after a call through a bad function pointer (issues #20 and #37):** in both reports the game made
   an indirect call to an address that is not a function (#20: to 0, from the UI timeline's clip list `0x149340`, on the
   way from the docks to the first Medusa; #37: to `0x308B527B`, from the per-frame function `0x1D6CD0`, right after the
   movie of Kratos climbing Cronos, on a translated disc). The callers unwound, the main thread went dormant and the
-  picture froze. Since 0.3.4:
+  picture froze. Since 0.4.0:
   - #37: `0x1D6CD0` makes a virtual call on Kratos (the first field of the player controller `0x29CD58`) with no NULL
     check, and Kratos was still NULL in the first frames after the movie, so the vtable was read from address 4. The
     update is skipped while there is no Kratos (`[gow-heapguard] player update skipped`). Why Kratos is missing there
@@ -107,6 +107,10 @@ Last reviewed: October 2026, against the code in this repository.
   5 s that only the clang build had (writing a log line cost the game 50-100 ms) is fixed: the log now goes through its
   own writer thread (`GOW_LOG_DIRECT=1` restores the old path). An installation without Visual Studio on a clean PC has
   not been verified yet. `install.cmd -Compiler msvc` keeps the previous build.
+- **Weak PCs (0.4.0):** measured only on a desktop CPU (Core i5-12400F) pinned to fewer cores, never on real low-end
+  hardware. A dual core without SMT holds 60 FPS with no hitches (46.8 FPS with many hitches in 0.3.3), a dual core with
+  SMT (i3/Pentium class) holds 60, and a dual core with cores 1.5-2x slower, approximated by taking CPU time away, runs
+  at 51-55 FPS without hitches. Numbers and method in [`dev/TOASTER_PLAN.md`](dev/TOASTER_PLAN.md).
 - **Coverage of areas:** no systematic play-through validation exists. Zones beyond the ones tested while developing the
   port may still show visual or audio defects.
 
