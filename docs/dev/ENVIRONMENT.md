@@ -65,7 +65,9 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 | `GOW_FAST_DISPATCH=0` | Turns off the inline call dispatch of the generated code (`dispatchGuestBranch` in `ps2_runtime.h`); every guest call then goes through the slow path. Also off with `GOW_GAP_DIAG` or `PS2X_GS_WORKER_TRACE`, and for the `GOW_PERF_FRAME_PC` function |
 | `GOW_EE_WAIT=1` | The EE sleeps while waiting for the frame (changes game pacing) |
 | `PS2X_IOP_NATIVE`, `PS2X_IOP_NATIVE_STATS` | Native IOP module use and its hit statistics |
-| `PS2X_THREAD_PRIORITY` | Thread priority policy |
+| `PS2X_THREAD_PRIORITY=0\|1` | The GL thread runs above normal priority by default only when the process may use 4 or more logical processors (its affinity mask); `0`/`1` force it off/on |
+| `GOW_GS_STAGE_SPIN_US=<us>` | How long the GS stage spins before sleeping when idle. Default 50 with 4 or more usable processors, 0 below (on 2 cores the spin took the CPU the EE and VU1 need) |
+| `GOW_HOST_WAIT_FRACTION=yield\|sleep` | How the EE waits the last fraction of a millisecond before a pacing deadline: `yield` (default with 4 or more usable processors: precise, keeps the thread runnable) or `sleep` (default below: a high-resolution timer, leaves the CPU to the other threads) |
 
 ## Input and features
 

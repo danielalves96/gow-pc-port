@@ -150,6 +150,36 @@ lock polled with `sleep_for(50 us)` when contended (at least ~1 ms on Windows). 
 confirmation run above has no window below 59.9 FPS and no hitch over 100 ms after start-up. With 2 cores the game is still
 CPU-bound below 60 FPS: the next steps are the ones in the design note below plus fewer heavy threads competing.
 
+### Round 2: total CPU on 2 cores (2026-11-11/12)
+
+Two cores could not hold 60 FPS after round 1, so the second round went after every heavy thread and after the policies
+that only pay where a core is free. All measured with the launcher's environment at 60 FPS, alternating pairs of 150 s
+after a discarded warm-up run (`ab-perf.ps1 -WarmupRunSeconds`, new: the first run of a series used to meet a cool machine
+and was by far the fastest, always variant A).
+
+- VU1: loop folding in the generator (`vu1n-gen`, 85 self-looping blocks iterate inside one call), a cached registry key for
+  slot setups, no x87 widening on the fast path of `normalizeFmacResult`, no empty commit at callouts. Replay bench: 0 differ,
+  and the per-record hashes with the final cycle count identical to the base (cycle-exact).
+- VIF1 UNPACK: contiguous-destination loops for CL == WL.
+- GS: the draw state is rebuilt only after a state register write; byte compares before field compares in the backend.
+- IOP: the native IRX modules are now built at installation from the disc (`ps2-tools iop-manifest`,
+  `RustPortPS2/games/scus-97399/iop.manifest`; the 8 modules byte-identical to a game dump). Before, they only came from the
+  optimization run, which the VU1 manifest path skips: most installations ran every IRX instruction interpreted. Import stub
+  decoding is memoized and plain interpreted instructions run in a tight loop.
+- Diagnostics: `ps2_perf` reads the TSC instead of `QueryPerformanceCounter` (the launcher always enables it).
+- Policies that depend on the usable processors (4 or more: as before; fewer: the CPU goes to the EE and the VU1): the GS
+  stage idle spin, the EE's wait for the last fraction of a millisecond (yield or high-resolution sleep), the GL thread's
+  above-normal priority. See `docs/dev/ENVIRONMENT.md`.
+
+| 2 cores, opening scene | FPS mean | worst 5 s window | p95 frame time | frames over 50 ms | hitches >= 100 ms per run |
+|---|---|---|---|---|---|
+| `d01ed93` (start) | 40.0 | 21.4 | 75.8 ms | 392 | 117-163 |
+| `6d19eca` (round 2) | 49.8 | 32.1 | 37.1 ms | 186 | 1 (start-up) |
+| `aa33f76` (+ the low-core policies) | 53.9 (vs 48.1 for `6d19eca` in the same series) | 38.9 | 32.0 ms | 81 | 1 |
+
+Internal scale 1x or 2x instead of 4x changes nothing on 2 cores (CPU-bound). Four cores keep a steady 60 FPS; round 2 took
+another ~19 % off the GS thread there.
+
 **Design note: what is left for the VU1** (it stays above ~4 ms per frame on 4 cores):
 
 - *Kernel specialization* (step 3 proper): hand-written or generated SIMD versions of the four vertex kernels that process 4
