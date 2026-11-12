@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <thread>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -212,10 +213,45 @@ void GSThreadedBackend::Drain() const
                   { return m_completed >= target || m_stop; });
 }
 
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+extern "C"
+{
+    __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
+    __declspec(dllimport) int __stdcall GetProcessAffinityMask(void *process, unsigned long long *processMask,
+                                                              unsigned long long *systemMask);
+}
+#endif
+
+namespace
+{
+    // Logical processors this process may run on (its affinity mask on Windows, so a run pinned with -Cores counts too).
+    unsigned usableProcessorsForGl()
+    {
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+        unsigned long long process = 0, system = 0;
+        if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0)
+            return static_cast<unsigned>(std::popcount(process));
+#endif
+        return std::max(1u, std::thread::hardware_concurrency());
+    }
+
+    // The GL thread runs above normal priority only where the process has a core to spare. On 2 cores it preempted the EE
+    // and the VU1 (measured at 60 FPS with the launcher's environment, 3 alternating pairs: 51.1 -> 52.2 FPS, worst 5 s
+    // window 31.9 -> 37.2, frames over 50 ms 152 -> 113 with it off). PS2X_THREAD_PRIORITY=0/1 still forces it.
+    bool raiseGlThread()
+    {
+        const char *value = std::getenv("PS2X_THREAD_PRIORITY");
+        if (value && *value)
+            return *value != '0';
+        return usableProcessorsForGl() >= 4u;
+    }
+}
+
 void GSThreadedBackend::WorkerLoop()
 {
     ThreadNaming::SetCurrentThreadName("GSThread");
-    ThreadPriority::RaiseCurrentThread(ThreadPriority::Level::AboveNormal);
+    if (raiseGlThread())
+        ThreadPriority::RaiseCurrentThread(ThreadPriority::Level::AboveNormal);
     GSPrimitiveBatch draw;
     for (;;)
     {
