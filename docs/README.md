@@ -25,7 +25,7 @@ They are split in two: what a **player** needs (this folder) and what a **contri
 | Page | Contents |
 |---|---|
 | [`INSTALL.md`](INSTALL.md) | Requirements, the Windows wizard, both installer scripts and every option, what the installation creates, the optimization pass, updating and removing |
-| [`LAUNCHER.md`](LAUNCHER.md) | The eight tabs and every setting with its default, the setup wizard, what PLAY does, where settings, logs and the shader cache live |
+| [`LAUNCHER.md`](LAUNCHER.md) | The nine tabs and every setting with its default, the setup wizard, what PLAY does, where settings, logs and the shader cache live |
 | [`PLAYING.md`](PLAYING.md) | Default keyboard and mouse layout, in-game shortcuts, the cheat menu, target lock, agile combat, gamepad, saves and memory card, achievements |
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Installation, startup, performance, audio, saves and controls, by symptom; where the logs are; what to attach to a report |
 | [`STATUS.md`](STATUS.md) | Platform support, what works, known limitations, open problems (including the experimental Linux state) |

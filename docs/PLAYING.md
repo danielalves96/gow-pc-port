@@ -171,6 +171,10 @@ If you prefer the original timing, turn the switch off.
   Formatting a blank card from inside the game has not been verified, so avoid copying in a blank card.
 - Before the first save of each session the card is copied to **`Mcd001.ps2.bak`**: if a crash or a power loss cuts a
   save, close the game and rename the `.bak` back to `Mcd001.ps2`.
+- **Save history**: every time you save at an altar, the game keeps a dated copy of the whole card (the newest 30, in
+  `save-backups/` next to the card) and says so on screen. The launcher's **Saves** tab lists the saves on the card and the
+  copies, and restores one with the game closed (the card it replaces is kept in the history first). `GOW_SAVE_BACKUP=0`
+  turns the copies off.
 - A card file of the wrong size (cut, empty, or a 16/32 MB card) is never written over: it is renamed to
   `Mcd001.ps2.unusable` and the game gets a blank card. `ps2-tools mc-check Mcd001.ps2` checks a card, and
   `ps2-tools mc-format <file>` creates a formatted one.

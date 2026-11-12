@@ -66,6 +66,12 @@ Last reviewed: October 2026, against the code in this repository.
 
 ## Open problems
 
+- **Features added after 0.3.4 and what was checked** (Windows, private copy of a PCSX2 card, Radeon RX 6600): the save history
+  (copy made at the exact moment the game completes a save, identical to the card, original untouched), the effect switches
+  (altar glow gone, rest identical), render scale 0.75x (clean). **Not clean:** 0.5x and 0.25x show a tinted rectangle in
+  bloom-heavy scenes. **Not reproduced:** the movie-end freeze of `P04MP05`; its wrappers are in but never triggered. **Not
+  checked:** the tail-of-movie audio catch-up (needs ears), Linux for any of it, the in-game notice at other window sizes.
+
 - **Hang after saving (Windows):** after a save completes, a sequence of events can freeze the game. It was first
   traced to the VIF/DMA path; a 0.3.2 sample (clang build with the speed profile, early FINISH on) instead shows the game
   spinning in the animation controller update `0x116EF0`, in the loop that walks an animation's time in fixed steps

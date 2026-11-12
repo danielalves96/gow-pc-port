@@ -95,6 +95,14 @@ the runtime files: then it asks once.
 **Find files automatically** looks next to the launcher, in a repository checkout above it and in the default
 installation folder. **Setup wizard** reopens the installer.
 
+### Saves
+
+Lists the God of War saves on the memory card (slot, zone code, when the game wrote it) and the **save history**: the dated
+copies the game makes at every altar. **Back up now** adds a manual copy. **Show saves** opens what a copy holds; **Restore**
+puts it in place of the card, only with the game closed, and keeps the card it replaces in the history (`Before a restore`).
+The page follows the history while the game runs. Zone codes are shown as the game stores them (`Athn02C`); names and
+thumbnails are not read from the game's data yet.
+
 ### Controls
 
 Keyboard and mouse mapping (two keys per action), gamepad layout (Classic PS2, Modern DMC5 or **Custom**), the four

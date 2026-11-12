@@ -203,6 +203,19 @@ the first 400 textures, plus each upload, under the `[gow-texrepl]` tag. Format,
 - **No software fallback.** A primitive or a view the renderer cannot express is dropped with a counted reason
   (`[gs-hw-skip]`, dumped with `GOW_GS_HW_DUMP`), not rasterized somewhere else.
 
+## 7. Internal scale below 1x and effect switches
+
+- **Below 1x.** `PS2X_GS_HW_SCALE` accepts 0.25 to the GPU's limit (the launcher offers 0.25, 0.5 and 0.75 for integrated
+  GPUs). Every size in the backend already follows the float `scale` (render targets are `ceil(px * scale)`, scissors, vertex
+  offsets, presentation), and the scaler stretches the picture to the window. Checked on a Radeon RX 6600: 0.75x is clean;
+  **0.5x shows a tinted rectangle across the centre of bright, bloom-heavy scenes** (the altar light), which `GOW_GS_RT_SHIFT=0` does not
+  remove, so it is not the filtered-read shift. Cause not found; the launcher says so next to the 0.5x and 0.25x options.
+- **Effect switches** (`gs_frontend.cpp`, Performance tab): a masked primitive is never submitted, and the next draw rebuilds
+  its state (`m_drawStateDirty`). Shadow volumes are untextured, `COLCLAMP` off, `ALPHA = 0x68`; additive 3D effects are
+  `ALPHA` with a = 0, b = 2, d = 1 and the Z test on (the HUD and screen flashes keep it off); the game's full-screen present copy is never
+  masked. `GOW_FX_FILTER=0` forces nearest sampling except for that copy. Checked at the Athens altar: with the switches off the
+  light beam and glow disappear and the rest of the picture is the same.
+
 ## 5. Verification tooling
 
 | Tool | What it does | What it proves (and what it does not) |

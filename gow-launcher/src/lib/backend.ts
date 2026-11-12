@@ -2,7 +2,7 @@
 // in-memory mock stands in, so the interface can be developed and checked without the Tauri shell.
 
 import type {
-  BuildActivity, Bootstrap, DestinationValidation, GameFinished, GameStatus, GamepadCaptured, InstallOutcome,
+  BuildActivity, Bootstrap, CardSlot, SaveBackup, DestinationValidation, GameFinished, GameStatus, GamepadCaptured, InstallOutcome,
   ChdOutcome, ChdPlan, InstallProgress, IsoValidation, LiveState, PatchError, PatchOutcome, OptimizerSnapshot, PadDeviceList, RebuildState, Settings, TexturePackInfo, TexturePackOutcome, TexturePackProgress,
   UpdateMode, UpdateState, WizardInfo,
 } from './types';
@@ -46,6 +46,11 @@ export interface Api {
   detectPaths(force: boolean): Promise<Settings>;
   detectedIso(): Promise<string>;
   memoryCardFile(elf: string): Promise<string>;
+  cardSlots(elf: string): Promise<CardSlot[]>;
+  saveBackups(elf: string): Promise<SaveBackup[]>;
+  saveBackupSlots(elf: string, id: string): Promise<CardSlot[]>;
+  backupCardNow(elf: string): Promise<SaveBackup>; // rejects with a message
+  restoreSaveBackup(elf: string, id: string): Promise<void>; // rejects with a message
   startGame(): Promise<void>; // rejects with a LaunchError
   stopGame(): Promise<void>;
   isGameRunning(): Promise<boolean>;
@@ -131,6 +136,11 @@ async function createTauriApi(): Promise<Api> {
     detectPaths: (force) => call('detect_paths', { force }),
     detectedIso: () => call('detected_iso'),
     memoryCardFile: (elf) => call('memory_card_file', { elf }),
+    cardSlots: (elf) => call('card_slots', { elf }),
+    saveBackups: (elf) => call('save_backups', { elf }),
+    saveBackupSlots: (elf, id) => call('save_backup_slots', { elf, id }),
+    backupCardNow: (elf) => call('backup_card_now', { elf }),
+    restoreSaveBackup: (elf, id) => call('restore_save_backup', { elf, id }),
     startGame: () => call('start_game'),
     stopGame: () => call('stop_game'),
     isGameRunning: () => call('is_game_running'),
@@ -198,7 +208,7 @@ async function createTauriApi(): Promise<Api> {
 export const defaultSettings: Settings = {
   language: '', gpu: 'auto', displayMode: 'fullscreen', widthPx: 1280, heightPx: 800, aspectMode: '', widescreen: true, stretch: false,
   filter: 'bilinear', sharpness: 0.8, fxaa: true, brightness: 50, contrast: 50, gamma: 50, saturation: 50, progressive480p: true, internalResolution: '2', fpsLimit: 60,
-  vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, elf: '', iso: '', executable: '', skipVideos: true, fastBoot: false, customTextures: false, asyncTextures: true,
+  vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, fxShadows: true, fxAdditive: true, fxFilter: true, elf: '', iso: '', executable: '', skipVideos: true, fastBoot: false, customTextures: false, asyncTextures: true,
   settingsVersion: 0, dmc5Controls: false, padButtons: '', padMap: '', padDevice: '', padDeviceName: '', padSdlMap: '', cancelAnimations: true, escQuits: false,
   minimizeOnPlay: true, secondsPlayed: 0, lastSession: 0, keys: '', cheats: '', cheatsShortcut: '',
   retroAchievementsEnabled: false, retroAchievementsUser: '',
@@ -352,11 +362,16 @@ export function createMockApi(
       arguments: { play: false, wizard: false },
     }),
     patchSettings: async (patch) => merge(patch),
-    resetGameOptions: async () => merge({ gpu: 'auto', displayMode: 'fullscreen', filter: 'bilinear', sharpness: 0.8, fxaa: true, brightness: 50, contrast: 50, gamma: 50, saturation: 50, internalResolution: '2', fpsLimit: 60, vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, cheats: '', cheatsShortcut: '' }),
+    resetGameOptions: async () => merge({ gpu: 'auto', displayMode: 'fullscreen', filter: 'bilinear', sharpness: 0.8, fxaa: true, brightness: 50, contrast: 50, gamma: 50, saturation: 50, internalResolution: '2', fpsLimit: 60, vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, fxShadows: true, fxAdditive: true, fxFilter: true, cheats: '', cheatsShortcut: '' }),
     gameStatus: async () => status(),
     detectPaths: async () => settings,
     detectedIso: async () => '',
     memoryCardFile: async (elf) => (elf ? elf.replace(/[\\/][^\\/]*$/, '') + '\\Mcd001.ps2' : ''),
+    cardSlots: async () => [],
+    saveBackups: async () => [],
+    saveBackupSlots: async () => [],
+    backupCardNow: async () => ({ id: '20260101-000000', created: '2026-01-01T00:00:00', createdUnix: 1767225600, source: 'manual', size: 0 }),
+    restoreSaveBackup: async () => undefined,
     startGame: async () => {
       // The same refusals as `start_game`.
       if (profileStage !== 'none') throw { key: 'errorProfiling', detail: '' };

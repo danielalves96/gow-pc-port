@@ -26,6 +26,7 @@ pub mod process;
 pub mod proctree;
 pub mod rebuild;
 pub mod report;
+pub mod saves;
 pub mod script;
 pub mod settings;
 pub mod shortcut;

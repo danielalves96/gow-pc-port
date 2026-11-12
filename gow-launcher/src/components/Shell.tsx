@@ -1,7 +1,7 @@
 ﻿import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AlertTriangle, Check, Circle, Gauge, Gamepad2, FolderOpen, Layers, Loader2, Minus, Monitor, Play, Settings2, Sparkles, Square, Trophy, X,
+  AlertTriangle, Check, Circle, Gauge, Gamepad2, FolderOpen, Layers, Loader2, Minus, Monitor, Play, Save, Settings2, Sparkles, Square, Trophy, X,
 } from 'lucide-react';
 import badgeUrl from '../assets/theme/badge.webp';
 import logoUrl from '../assets/theme/logo.webp';
@@ -471,13 +471,14 @@ export function Hero() {
 
 // ----------------------------------------------------------------------------------------------- sections
 
-export type SectionId = 'graphics' | 'textures' | 'performance' | 'files' | 'controls' | 'cheats' | 'other' | 'retro';
+export type SectionId = 'graphics' | 'textures' | 'performance' | 'files' | 'saves' | 'controls' | 'cheats' | 'other' | 'retro';
 
 export const sections: { id: SectionId; key: string; icon: IconComponent }[] = [
   { id: 'graphics', key: 'tabGraphics', icon: Monitor },
   { id: 'textures', key: 'tabTextures', icon: Layers },
   { id: 'performance', key: 'tabPerformance', icon: Gauge },
   { id: 'files', key: 'tabFiles', icon: FolderOpen },
+  { id: 'saves', key: 'tabSaves', icon: Save },
   { id: 'controls', key: 'tabControls', icon: Gamepad2 },
   { id: 'cheats', key: 'tabCheats', icon: Sparkles },
   { id: 'other', key: 'tabOther', icon: Settings2 },

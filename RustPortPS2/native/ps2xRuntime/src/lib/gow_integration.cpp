@@ -39,6 +39,7 @@
 #include <vector>
 #include "gow_aspect.h" // GOW-Port: PC_ASPECT / PC_WIDESCREEN parsing (testable without the game)
 #include "gow_osd.inl" // GOW-Port: MSI Afterburner-style performance OSD (GS FPS, GPU, CPU, RAM)
+#include "gow_notice.h"  // GOW-Port: short host notices over the game (save backups)
 #include "gow_overlay.h" // GOW-Port: live switches of that OSD for the pause menu
 #include "gow_persist.h" // GOW-Port: what the player changes in game goes back to the launcher
 #include "gow_cheats.h"
@@ -1150,6 +1151,7 @@ void gowFrameDraw(float x, float y, float w, float h, uint64_t presentedSequence
     gowTargetingDraw(x, y, w, h);
     gowCheatsMenuDraw();
     gowRetroAchievementsDraw();
+    gowNoticeDraw();
     // GOW-Port: a 30 FPS limit (or the native menu) installs the hook without the OSD being on
     static bool osdWasShown = false;
     const gow_osd::Show show = osdShow();

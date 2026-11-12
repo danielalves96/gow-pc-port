@@ -30,6 +30,10 @@ export interface Settings {
   showCpu: boolean;
   showRam: boolean;
   earlyFinish: boolean;
+  /** Effect switches for weak GPUs: character shadows (`GOW_FX_SHADOWS`), additive 3D effects (`GOW_FX_ADDITIVE`), texture filtering (`GOW_FX_FILTER`). */
+  fxShadows: boolean;
+  fxAdditive: boolean;
+  fxFilter: boolean;
   elf: string;
   iso: string;
   executable: string;
@@ -153,6 +157,26 @@ export interface ExecutableState {
   exists: boolean;
   executable: boolean;
 }
+/** One save of the memory card (or of a backup), as the game lists it. */
+export interface CardSlot {
+  index: number;
+  file: string;
+  /** Seconds since 1970 (UTC). */
+  modifiedUnix: number;
+  /** The zone code the save stands in (`Athn02C`). */
+  zone: string;
+}
+
+/** A dated copy of the card the game made at an altar, or the player asked for. */
+export interface SaveBackup {
+  id: string;
+  created: string;
+  createdUnix: number;
+  /** `auto`, `manual` or `before-restore`. */
+  source: string;
+  size: number;
+}
+
 export interface GameStatus {
   game: GameState;
   data: DataState;

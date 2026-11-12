@@ -288,9 +288,11 @@ pub fn build_environment(ctx: &LaunchContext<'_>, inherited: impl Fn(&str) -> Op
     }
     // Internal GS resolution, 1..8 (recommended 2x; from 3x up it needs a strong GPU, and the runtime keeps the render
     // targets within the GPU's texture limit).
-    let scale = ctx.scale.clamp(1.0, crate::settings::MAX_SCALE);
-    plan.insert("PS2X_GS_SCALE", fixed(scale, 1));
-    plan.insert("PS2X_GS_HW_SCALE", fixed(scale, 1)); // Waffle's renderer reads the scale from here
+    // Below 1x (down to a quarter) the game is drawn smaller than the PS2 and stretched to the window: integrated GPUs.
+    let scale = ctx.scale.clamp(crate::settings::MIN_SCALE, crate::settings::MAX_SCALE);
+    let digits = if scale < 1.0 { 2 } else { 1 };
+    plan.insert("PS2X_GS_SCALE", fixed(scale, digits));
+    plan.insert("PS2X_GS_HW_SCALE", fixed(scale, digits)); // Waffle's renderer reads the scale from here
     plan.insert("PC_FALLBACK_SMOOTHNESS", "0");
     // The shared queue stays non-blocking at high scale; the value can be overridden for diagnostics.
     keep_inherited(&mut plan, "GOW_PRESENT_BLOCKING", "0");
@@ -318,6 +320,10 @@ pub fn build_environment(ctx: &LaunchContext<'_>, inherited: impl Fn(&str) -> Op
     plan.flag("PC_SHOW_RAM", settings.show_ram, Some("0"));
     // Early FINISH is on in the runtime by default; "0" turns it off.
     plan.flag("GOW_GS_EARLY_FINISH", settings.early_finish, Some("0"));
+    // Effect switches: on in the runtime by default, "0" masks the effect (src/lib/gs/gs_frontend.cpp).
+    plan.flag("GOW_FX_SHADOWS", settings.fx_shadows, Some("0"));
+    plan.flag("GOW_FX_ADDITIVE", settings.fx_additive, Some("0"));
+    plan.flag("GOW_FX_FILTER", settings.fx_filter, Some("0"));
 
     // Files. The runtime reads the disc from the ISO (without an extracted PART2.PAK there is no complete disc in the
     // directory); without a chosen ISO the first one next to the ELF is used.
@@ -470,6 +476,9 @@ mod tests {
             ("PC_WINDOW_FPS", "120"), // the test display refreshes at 144 Hz: capped at MAX_FPS
             ("GOW_AUDIO_DEVICE", "default"),
             ("GOW_CANCEL", "1"),
+            ("GOW_FX_ADDITIVE", "1"),
+            ("GOW_FX_FILTER", "1"),
+            ("GOW_FX_SHADOWS", "1"),
             ("GOW_GS_EARLY_FINISH", "1"),
             ("GOW_GS_FINISH_ASYNC", "1"),
             ("GOW_NATIVE_CHEATS_MENU", "1"),

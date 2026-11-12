@@ -123,6 +123,9 @@ namespace
             runtime.replaceFunction(0x00188B80u, gowMovieStreamService);
             runtime.replaceFunction(0x0018A788u, gowMovieVideoRingWrite);
             runtime.replaceFunction(0x0018AAA8u, gowMovieNodata);
+            runtime.replaceFunction(0x00188848u, gowMovieStreamRead); // end of a movie's file (GOW_MOVIE_EOF=0 undoes it)
+            runtime.replaceFunction(0x00189B00u, gowMovieCompletion);
+            runtime.replaceFunction(0x00189A88u, gowMovieTailAudio);
             if (std::getenv("GOW_MOVIE_OVERRIDE") || std::getenv("GOW_MPEG_DIAG"))
                 runtime.replaceFunction(0x00188CA0u, gowMovieOverrideLoad);
             if (std::getenv("GOW_BONUS_MOVIE") || movieOverrideCount() > 1)
@@ -132,6 +135,7 @@ namespace
             if (std::getenv("GOW_MPEG_DIAG"))
                 runtime.replaceFunction(0x0017AFE0u, gowDiagStreamRead);
         }
+        runtime.replaceFunction(0x0022E800u, gowSaveWriteFile); // observes the end of a save (backup, notice)
         if (const char *diag = std::getenv("GOW_LOADER_DIAG"); diag && std::strcmp(diag, "1") == 0)
             gowLoaderDiagInstall(runtime);
         // game logic rate (gow_logic_rate.cpp): PC_LOGIC_FPS > 60 paces the frame at N Hz, off by default

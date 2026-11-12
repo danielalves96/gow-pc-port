@@ -183,6 +183,95 @@ namespace gow_game
         sub_0018AAA8_0x18aaa8(rdram, ctx, runtime);
     }
 
+    // GOW-Port: end of a movie's file (P04MP05, the Cliffs of Madness lever movie, froze after its last picture).
+    // The game reads a movie through a stream (0x2FDE10: +0x28 state, 3 = the backing file reached its end, +0x24 the
+    // 16 KB blocks still queued) and the read callback 0x188848 hands out the queued blocks. Once they are gone it
+    // returns 0, and the refill 0x18AC20 takes 0 for "nothing yet": it calls the callback again, for ever, in its
+    // blocking path. Only a negative result ends the movie (the refill stores 1 at movie+0x154, the read-EOF flag).
+    // The callback answers -1 instead of 0 when the refill asks for data and the stream is at its end with nothing
+    // queued. Everything else (data queued, the cancel flag 0x29C848, other callers, resumptions) is the original.
+    //
+    // GOW_MOVIE_EOF=0 turns both wrappers of the end of a movie off (the original behaviour, to compare).
+    namespace
+    {
+        constexpr uint32_t kMoviePlayer = 0x00304F20u, kMovieStream = 0x002FDE10u, kMovieCancel = 0x0029C848u;
+
+        bool movieEofFixEnabled()
+        {
+            static const bool on = [] { const char *v = std::getenv("GOW_MOVIE_EOF"); return !v || v[0] != '0'; }();
+            return on;
+        }
+
+        // the stream is at the end of its file and every block has been handed out
+        bool movieStreamDrained(const uint8_t *rdram)
+        {
+            return readGuest32(rdram, kMovieStream + 0x28u) == 3u && readGuest32(rdram, kMovieStream + 0x24u) == 0u &&
+                   readGuest32(rdram, kMovieCancel) == 0u;
+        }
+    }
+
+    void gowMovieStreamRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // a1 = size asked (positive), ra = the refill's two call sites (0x18AC70: first read, 0x18AD34: blocking retry)
+        const uint32_t ra = GPR_U32(ctx, 31);
+        if (ctx->pc == 0x00188848u && movieEofFixEnabled() && (ra == 0x0018AC70u || ra == 0x0018AD34u) &&
+            static_cast<int32_t>(GPR_U32(ctx, 5)) > 0 && movieStreamDrained(rdram))
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[gow-fmv] stream drained: the read callback reports the end of the file\n");
+            }
+            returnToCaller(ctx, 0xffffffffu);
+            return;
+        }
+        sub_00188848_0x188848(rdram, ctx, runtime);
+    }
+
+    // GOW-Port: the movie's completion test 0x189B00 returns 1 as soon as the read-EOF flag (movie+0x154) is set, but
+    // the decoder can still hold pictures, so the last ones of a movie would be cut. For an MPEG movie (+0x140 = 2) whose stream is drained, the test waits
+    // until the decoder's reference buffer is empty, as it does without the flag: sceMpegIsRefBuffEmpty (0x26FF70) is
+    // two loads, *(*(movie + 0x40)). A movie that never empties its buffer is let go after GOW_MOVIE_EOF_WAIT_MS
+    // (default 1500) of host time, so a decoder that stopped can never keep the player here.
+    void gowMovieCompletion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static std::chrono::steady_clock::time_point waitingSince{};
+        static bool waiting = false;
+        if (ctx->pc == 0x00189B00u && movieEofFixEnabled())
+        {
+            const uint32_t movie = readGuest32(rdram, kMoviePlayer);
+            if (movie != 0u && readGuest32(rdram, movie + 0x154u) != 0u && readGuest32(rdram, movie + 0x140u) == 2u &&
+                movieStreamDrained(rdram))
+            {
+                const uint32_t refBuffer = readGuest32(rdram, movie + 0x40u);
+                const bool pending = guestBuffer(rdram, refBuffer, 4) != nullptr && readGuest32(rdram, refBuffer) == 0u;
+                static const long limitMs = [] {
+                    const char *v = std::getenv("GOW_MOVIE_EOF_WAIT_MS");
+                    return v ? std::max(0l, std::atol(v)) : 1500l;
+                }();
+                if (pending)
+                {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (!waiting)
+                    {
+                        waiting = true;
+                        waitingSince = now;
+                        std::fprintf(stderr, "[gow-fmv] end of stream: waiting for the decoder to show its last pictures\n");
+                    }
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - waitingSince).count() < limitMs)
+                    {
+                        returnToCaller(ctx, 0u);
+                        return;
+                    }
+                    std::fprintf(stderr, "[gow-fmv] decoder still holds pictures after %ld ms, ending the movie\n", limitMs);
+                }
+            }
+            waiting = false;
+        }
+        sub_00189B00_0x189b00(rdram, ctx, runtime);
+    }
+
     // GOW-Port: the movie thread never blocks: it polls its stream service (0x188B80, called only by the movie
     // player 0x188848) as fast as it can. Guest time only advances by executed cycles, and the recompiled poll costs
     // more host time per guest cycle than a real EE, so guest time, the IOP and the movie sound fell to ~0.72x real
@@ -219,6 +308,18 @@ namespace gow_game
         }
         runtime->eeScheduler().catchUpToHost(EeScheduler::kEeClockHz / 60u);
         sub_00188B80_0x188b80(rdram, ctx, runtime);
+    }
+
+    // GOW-Port: the end of a movie. After the last picture the player drains its display queue in a loop at 0x189794: it
+    // refills the audio (0x189A88, return address 0x18979C), polls 0x26CE98 and repeats until the VBlank handler has emptied
+    // the queue. That loop never calls the stream service, so the host-time catch-up above does not apply to it, and the
+    // last fields of the movie's sound reach the mixer as guest time creeps forward cycle by cycle: the device runs dry
+    // right before the transition. The same one-field catch-up is applied at that call site only.
+    void gowMovieTailAudio(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc == 0x00189A88u && GPR_U32(ctx, 31) == 0x0018979Cu)
+            runtime->eeScheduler().catchUpToHost(EeScheduler::kEeClockHz / 60u);
+        sub_00189A88_0x189a88(rdram, ctx, runtime);
     }
 
     void gowSkipMovieReady(uint8_t *, R5900Context *ctx, PS2Runtime *) { returnToCaller(ctx, 1u); }

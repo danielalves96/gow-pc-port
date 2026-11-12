@@ -554,6 +554,10 @@ void main()
 static std::atomic<float> g_gowPendingScale{0.0f};
 static std::atomic<float> g_gowCurrentScale{0.0f};
 static std::atomic<float> g_gowMaxScale{16.0f};
+// GOW-Port: the internal scale may go below 1x (a quarter of the PS2's resolution at the least) for integrated GPUs: the render
+// targets, scissors, vertex offsets and the presentation all size by the float `scale`, and the picture is stretched to the
+// window by the scaler afterwards.
+static constexpr float kMinRenderScale = 0.25f;
 
 void gowGsScaleSet(float scale)
 {
@@ -569,7 +573,7 @@ float gowGsScaleGet()
     if (current > 0.0f)
         return current;
     const char *s = std::getenv("PS2X_GS_HW_SCALE"); // before the renderer exists
-    return s ? std::max(1.0f, static_cast<float>(std::atof(s))) : 2.0f;
+    return s ? std::max(kMinRenderScale, static_cast<float>(std::atof(s))) : 2.0f;
 }
 
 struct GSHwBackend::Impl
@@ -1013,7 +1017,7 @@ struct GSHwBackend::Impl
         }
         float limitScale = 16.0f;
         if (const char *s = std::getenv("PS2X_GS_HW_SCALE"))
-            scale = std::max(1.0f, static_cast<float>(std::atof(s)));
+            scale = std::max(kMinRenderScale, static_cast<float>(std::atof(s)));
         // GOW-Port: the launcher offers up to 8x. A render target is fbw * 64 PS2 pixels wide (God of War uses fbw <= 10,
         // 640 px) and 512 tall; keep a 1024 x 512 target within the GPU's texture limit (16384 on most cards: 16x).
         {
@@ -1110,7 +1114,7 @@ struct GSHwBackend::Impl
         if (wanted <= 0.0f)
             return;
         g_gowPendingScale.store(0.0f, std::memory_order_relaxed);
-        const float next = std::clamp(wanted, 1.0f, g_gowMaxScale.load(std::memory_order_relaxed));
+        const float next = std::clamp(wanted, kMinRenderScale, g_gowMaxScale.load(std::memory_order_relaxed));
         if (!initialized || std::fabs(next - scale) < 0.001f)
             return;
         flushPending();

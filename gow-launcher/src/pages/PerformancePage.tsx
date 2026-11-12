@@ -7,10 +7,13 @@ import { useApp } from '../state/app';
 /** Highest internal scale the launcher offers (`MAX_SCALE` in gow-core). */
 export const MAX_SCALE = 8;
 
+/** Lowest internal scale the launcher offers (`MIN_SCALE` in gow-core). */
+export const MIN_SCALE = 0.25;
+
 /** Internal scale requested: "auto" and anything above 8x fall back to 2x (mirrors `Settings::selected_scale`). */
 export function selectedScale(internalResolution: string): number {
   const n = parseFloat(internalResolution);
-  return internalResolution === 'auto' || Number.isNaN(n) || n > MAX_SCALE ? 2 : Math.max(1, n);
+  return internalResolution === 'auto' || Number.isNaN(n) || n > MAX_SCALE ? 2 : Math.max(MIN_SCALE, n);
 }
 
 export function PerformancePage() {
@@ -91,6 +94,16 @@ export function PerformancePage() {
       )}
       <SettingRow icon={Layers} title={t('earlyFinish')} description={t('earlyFinishDesc')}>
         <Switch label={t('earlyFinish')} checked={settings.earlyFinish} onChange={(earlyFinish) => patch({ earlyFinish })} />
+      </SettingRow>
+      <GroupTitle>{t('groupEffects')}</GroupTitle>
+      <SettingRow icon={Layers} title={t('fxShadows')} description={t('fxShadowsDesc')}>
+        <Switch label={t('fxShadows')} checked={settings.fxShadows} onChange={(fxShadows) => patch({ fxShadows })} />
+      </SettingRow>
+      <SettingRow icon={Flame} title={t('fxAdditive')} description={t('fxAdditiveDesc')}>
+        <Switch label={t('fxAdditive')} checked={settings.fxAdditive} onChange={(fxAdditive) => patch({ fxAdditive })} />
+      </SettingRow>
+      <SettingRow icon={Gpu} title={t('fxFilter')} description={t('fxFilterDesc')}>
+        <Switch label={t('fxFilter')} checked={settings.fxFilter} onChange={(fxFilter) => patch({ fxFilter })} />
       </SettingRow>
       <GroupTitle>{t('groupOverlay')}</GroupTitle>
       <SettingRow icon={Activity} title={t('showFps')} description={t('showFpsDesc')}>

@@ -10,6 +10,9 @@ pub const SETTINGS_VERSION: u32 = 14;
 /// Highest internal GS scale the launcher offers (the runtime also keeps it within the GPU's texture limit).
 pub const MAX_SCALE: f64 = 8.0;
 
+/// Lowest internal GS scale the launcher offers: a quarter of the PS2's resolution, for integrated GPUs.
+pub const MIN_SCALE: f64 = 0.25;
+
 /// Value of the four Shade Boost settings that leaves the picture as the game draws it.
 pub const IMAGE_NEUTRAL: i32 = 50;
 
@@ -36,7 +39,7 @@ pub struct Settings {
     pub gamma: i32,
     pub saturation: i32,
     pub progressive480p: bool,
-    /// "auto" or "1".."8" (`PS2X_GS_SCALE`).
+    /// "auto" or "0.25".."8" (`PS2X_GS_SCALE`). Below 1 the game is drawn smaller than the PS2 and stretched (integrated GPUs).
     pub internal_resolution: String,
     pub fps_limit: i32,
     pub vsync: bool,
@@ -48,6 +51,11 @@ pub struct Settings {
     pub show_ram: bool,
     /// Early FINISH (`GOW_GS_EARLY_FINISH`): the game prepares the next frame while the current one is still drawn.
     pub early_finish: bool,
+    /// Effect switches for weak GPUs (`GOW_FX_SHADOWS`, `GOW_FX_ADDITIVE`, `GOW_FX_FILTER`): character shadows, additive 3D
+    /// effects (fire, glows, particles) and bilinear texture filtering. On is the game as it is drawn.
+    pub fx_shadows: bool,
+    pub fx_additive: bool,
+    pub fx_filter: bool,
     pub elf: String,
     pub iso: String,
     pub executable: String,
@@ -120,6 +128,9 @@ impl Default for Settings {
             show_cpu: false,
             show_ram: false,
             early_finish: true,
+            fx_shadows: true,
+            fx_additive: true,
+            fx_filter: true,
             elf: String::new(),
             iso: String::new(),
             executable: String::new(),
@@ -287,10 +298,10 @@ impl Settings {
         }
     }
 
-    /// Internal GS scale actually requested: "auto" and anything above 8 fall back to 2x.
+    /// Internal GS scale actually requested: "auto" and anything above 8 fall back to 2x, anything below a quarter to 0.25x.
     pub fn selected_scale(&self) -> f64 {
         match self.internal_resolution.parse::<f64>() {
-            Ok(n) if self.internal_resolution != "auto" && n <= MAX_SCALE => n.max(1.0),
+            Ok(n) if self.internal_resolution != "auto" && n <= MAX_SCALE => n.max(MIN_SCALE),
             _ => 2.0,
         }
     }
@@ -319,6 +330,9 @@ impl Settings {
         self.reset_image_adjustment();
         self.progressive480p = true;
         self.internal_resolution = "2".into();
+        self.fx_shadows = true;
+        self.fx_additive = true;
+        self.fx_filter = true;
         self.fps_limit = 60;
         self.vsync = false;
         self.show_fps = false;
@@ -483,7 +497,9 @@ mod tests {
         assert_eq!(scale("8"), 8.0);
         assert_eq!(scale("6"), 6.0);
         assert_eq!(scale("3"), 3.0);
-        assert_eq!(scale("0.5"), 1.0);
+        assert_eq!(scale("0.5"), 0.5);
+        assert_eq!(scale("0.1"), 0.25);
+        assert_eq!(scale("0.75"), 0.75);
         assert_eq!(scale("x"), 2.0);
     }
 

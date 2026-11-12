@@ -219,6 +219,48 @@ fn memory_card_file(elf: String) -> String {
     game::memory_card_file(&elf)
 }
 
+// ---------------------------------------------------------------------------------------------- saves
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The saves the memory card holds, in the order the game lists them.
+#[tauri::command]
+fn card_slots(elf: String) -> Vec<gow_core::saves::CardSlot> {
+    let card = game::memory_card_file(&elf);
+    if card.is_empty() { Vec::new() } else { gow_core::saves::read_card_file_slots(std::path::Path::new(&card)) }
+}
+
+/// The dated copies of the card the game made at its altars (newest first).
+#[tauri::command]
+fn save_backups(elf: String) -> Vec<gow_core::saves::SaveBackup> {
+    let card = game::memory_card_file(&elf);
+    if card.is_empty() { Vec::new() } else { gow_core::saves::list_backups(std::path::Path::new(&card)) }
+}
+
+/// The saves inside one of those copies.
+#[tauri::command]
+fn save_backup_slots(elf: String, id: String) -> Vec<gow_core::saves::CardSlot> {
+    let card = game::memory_card_file(&elf);
+    if card.is_empty() { Vec::new() } else { gow_core::saves::backup_slots(std::path::Path::new(&card), &id) }
+}
+
+/// A copy of the card now (a manual one).
+#[tauri::command]
+fn backup_card_now(elf: String) -> Result<gow_core::saves::SaveBackup, String> {
+    let card = game::memory_card_file(&elf);
+    gow_core::saves::make_backup(std::path::Path::new(&card), "manual", unix_now()).map_err(|error| error.to_string())
+}
+
+/// Puts a copy in place of the card. Refused while the game runs; the card it replaces is kept in the history first.
+#[tauri::command]
+fn restore_save_backup(elf: String, id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let card = game::memory_card_file(&elf);
+    let running = state.game.lock().unwrap().is_some();
+    gow_core::saves::restore_backup(std::path::Path::new(&card), &id, running, unix_now()).map_err(|error| error.to_string())
+}
+
 // ---------------------------------------------------------------------------------------------- playing
 
 #[derive(Serialize)]
@@ -995,6 +1037,11 @@ pub fn run() {
             detect_paths,
             detected_iso,
             memory_card_file,
+            card_slots,
+            save_backups,
+            save_backup_slots,
+            backup_card_now,
+            restore_save_backup,
             start_game,
             stop_game,
             is_game_running,

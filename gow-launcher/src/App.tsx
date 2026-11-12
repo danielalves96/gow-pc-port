@@ -6,6 +6,7 @@ import { upper } from './lib/i18n';
 import { CheatsPage } from './pages/CheatsPage';
 import { ControlsPage } from './pages/ControlsPage';
 import { FilesPage } from './pages/FilesPage';
+import { SavesPage } from './pages/SavesPage';
 import { GraphicsPage } from './pages/GraphicsPage';
 import { OtherPage } from './pages/OtherPage';
 import { PerformancePage } from './pages/PerformancePage';
@@ -19,6 +20,7 @@ const pages: Record<SectionId, () => React.JSX.Element> = {
   textures: TexturesPage,
   performance: PerformancePage,
   files: FilesPage,
+  saves: SavesPage,
   controls: ControlsPage,
   cheats: CheatsPage,
   other: OtherPage,

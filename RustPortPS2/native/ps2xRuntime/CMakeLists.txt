@@ -311,6 +311,8 @@ src/lib/gs/gpu/gs_texture_store.cpp
     src/lib/gow_sampling.cpp
     src/lib/gow_frame_metrics.cpp # GOW-Port: GOW_FRAME_DIAG guest-frame interval distribution
     src/lib/gow_cheats.cpp
+    src/lib/gow_notice.cpp # GOW-Port: short host notices over the game
+    src/lib/gow_save_backup.cpp # GOW-Port: dated copies of the memory card
     src/lib/gow_video.cpp
     src/lib/gow_targeting.cpp
     src/lib/gow_animation_cancel.cpp

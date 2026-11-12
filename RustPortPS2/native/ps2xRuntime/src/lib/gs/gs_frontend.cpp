@@ -140,6 +140,56 @@ namespace
                   << "," << v.q << ") uv=(" << (v.u >> 4) << "," << (v.v >> 4) << ") a=" << static_cast<unsigned>(v.a) << " r=" << static_cast<unsigned>(v.r) << std::endl;
     }
 
+    // GOW-Port: effect switches for weak GPUs (the launcher's Graphics > Effects, GOW_FX_*=0 turns one off). Each one is a
+    // mask on the primitives the effect is drawn with, applied on the host side of the GS: the guest runs the same and only
+    // the picture changes. They are read once.
+    //  GOW_FX_SHADOWS=0   character shadow volumes: untextured, COLCLAMP off, ALPHA = Cs*FIX + Cd (0x68)
+    //  GOW_FX_ADDITIVE=0  additive effects in the 3D scene (fire, glows, particles): ALPHA = Cs*Cs + Cd with the Z test on;
+    //                     the HUD and screen flashes keep the Z test off and stay
+    //  GOW_FX_FILTER=0    nearest texture sampling instead of the game's bilinear
+    bool gowFxEnabled(const char *name)
+    {
+        const char *v = std::getenv(name);
+        return !(v && v[0] == '0');
+    }
+    bool gowFxShadows() { static const bool on = gowFxEnabled("GOW_FX_SHADOWS"); return on; }
+    bool gowFxAdditive() { static const bool on = gowFxEnabled("GOW_FX_ADDITIVE"); return on; }
+    bool gowFxFilter() { static const bool on = gowFxEnabled("GOW_FX_FILTER"); return on; }
+
+    // The game's present copy: a textured, blended sprite over the whole 640x448 screen reading another buffer. Never masked.
+    bool gowFxIsScreenCopy(const GSPrimitiveBatch &batch)
+    {
+        const GSDrawState &state = batch.state;
+        if (state.prim.type != GS_PRIM_SPRITE || batch.vertexCount < 2u || !state.prim.tme)
+            return false;
+        const GSContext &ctx = state.context;
+        const int ofx = static_cast<int>(ctx.xyoffset.ofx >> 4), ofy = static_cast<int>(ctx.xyoffset.ofy >> 4);
+        int x0 = static_cast<int>(batch.vertices[0].x) - ofx, y0 = static_cast<int>(batch.vertices[0].y) - ofy;
+        int x1 = static_cast<int>(batch.vertices[1].x) - ofx, y1 = static_cast<int>(batch.vertices[1].y) - ofy;
+        if (x0 > x1)
+            std::swap(x0, x1);
+        if (y0 > y1)
+            std::swap(y0, y1);
+        return ctx.frame.fbp != ctx.tex0.tbp0 && x0 <= 0 && y0 <= 0 && x1 >= 639 && y1 >= 447;
+    }
+
+    // 0 = draw it, 1 = a shadow switched off, 2 = an additive effect switched off
+    int gowFxMasked(const GSPrimitiveBatch &batch)
+    {
+        const GSDrawState &state = batch.state;
+        if (!state.prim.abe)
+            return 0;
+        const uint32_t alpha = static_cast<uint32_t>(state.context.alpha & 0xFFu);
+        if (!state.prim.tme && (state.colclamp & 1u) == 0u && alpha == 0x68u)
+            return gowFxShadows() || gowFxIsScreenCopy(batch) ? 0 : 1;
+        if (((state.context.test >> 16u) & 1u) == 0u) // Z test off: screen-space drawing
+            return 0;
+        const uint32_t a = alpha & 3u, b = (alpha >> 2) & 3u, d = (alpha >> 6) & 3u;
+        if (a == 0u && b == 2u && d == 1u)
+            return gowFxAdditive() || gowFxIsScreenCopy(batch) ? 0 : 2;
+        return 0;
+    }
+
     bool gowFogOff()
     {
         static const bool off = []
@@ -2063,7 +2113,14 @@ void GS::vertexKick(bool drawing)
         const GSPrimitiveBatch &batch = m_batch;
         updatePreferredDisplaySourceForDraw(batch);
         gowFogDiagDraw(batch); // GOW-Port: PS2X_GS_FOG_DIAG.
-        if (sameState)
+        static const bool fxMasks = !gowFxShadows() || !gowFxAdditive();
+        if (fxMasks && gowFxMasked(batch) != 0)
+        {
+            // GOW-Port: a masked primitive is never submitted; the next one rebuilds its state instead of assuming it matches
+            // the last submitted draw
+            m_drawStateDirty = true;
+        }
+        else if (sameState)
             m_backend->SubmitSameState(batch);
         else
             m_backend->Submit(batch);
@@ -2213,6 +2270,8 @@ bool GS::fillDrawBatch(int vertexCount)
     const uint8_t mmag = static_cast<uint8_t>((tex1 >> 5u) & 0x1u);
     const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6u) & 0x7u);
     batch.state.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
+    if (!gowFxFilter() && !gowFxIsScreenCopy(batch))
+        batch.state.linearFilter = false; // GOW-Port: GOW_FX_FILTER=0
     return false;
 }
 

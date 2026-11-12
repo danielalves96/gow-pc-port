@@ -64,7 +64,7 @@ nativas das bibliotecas que ele chama.
 
 ## Recursos
 
-- **Renderizador nativo** - OpenGL 4.6, render targets na GPU, resolução interna de 1× a 8×, upscaling bicúbico (com
+- **Renderizador nativo** - OpenGL 4.6, render targets na GPU, resolução interna de 0,25× a 8× (abaixo de 1× para GPUs integradas), upscaling bicúbico (com
   nitidez), bilinear ou pixel, FXAA, modo progressivo 480p, ajuste de brilho/contraste/gama/saturação.
 - **Widescreen (Hor+)** - 16:9, 16:10, 21:9 (experimental) e 32:9 (muito experimental: HUD e menus esticados) pelo patch do PCSX2, com chave; desligado mostra o 4:3 original.
 - **Vídeos** - MPEG-2 decodificado nativamente, com som, incluindo as versões widescreen do próprio jogo.
@@ -72,10 +72,10 @@ nativas das bibliotecas que ele chama.
   Windows e no Linux.
 - **Qualidade de vida** - menu de cheats (**F2**, nove cheats), mira travada (**Alt**), combate ágil, informações na tela com FPS, GPU, CPU e RAM (cada uma opcional),
   tela cheia.
-- **Saves** - cartão `Mcd001.ps2` compatível com o PCSX2, nos dois sentidos.
+- **Saves** - cartão `Mcd001.ps2` compatível com o PCSX2, nos dois sentidos. Uma cópia datada do cartão é guardada a cada save num altar, e a aba Saves do launcher restaura uma delas.
 - **Texturas personalizadas** - packs de substituição do PCSX2, com o pack da comunidade baixável pelo launcher.
 - **RetroAchievements** - login, notificações no jogo e modo hardcore que desativa os cheats.
-- **Launcher** - oito abas, assistente de instalação, otimização em segundo plano, inglês e português do Brasil.
+- **Launcher** - nove abas, assistente de instalação, otimização em segundo plano, inglês e português do Brasil.
 
 ## Suporte por plataforma
 

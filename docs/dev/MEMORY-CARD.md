@@ -56,6 +56,30 @@ the file system stays valid and the port loads the new save afterwards.
   (through a temporary too) before the first write of each session, and moves a card of the wrong size to
   `<card>.unusable` instead of writing pages over it. `native/tests/memory_card_test.cpp` covers the three.
 
+## Save history
+
+The card is written page by page and nothing at that level says a save is finished, so the port watches the game's own save
+state machine instead. God of War saves through libmc2 (EE) over `MC2_D`/`DBCMAN`: `0x22FE30` writes the slot's payload with
+the whole-file writer `0x22E800` and then the 68-byte slot index with the same writer, called from `0x2306B8`. The writer is
+polled once per frame; it returns 1 when the transfer ended, with the game's error code at `0x2A1284` and the byte count at
+`0x2A128C`. `src/game/gow_save.cpp` wraps it and, when the call that returns to `0x2306C0` (slot 0, 68 bytes) comes back with
+1, no error and 68 bytes, the save is complete: one `[gow-save] save complete` line and a dated copy of the card.
+
+- **Where**: `<card folder>/save-backups/<YYYYMMDD-HHMMSS>[-N]/`, with `Mcd001.ps2` (published last: its presence means the
+  copy is complete) and `backup.json` (`created`, `created_unix`, `source`, `size`). `src/lib/gow_save_backup.cpp` writes it,
+  `gow-launcher/crates/gow-core/src/saves.rs` reads it.
+- **How many**: the newest 30 automatic copies are kept (`GOW_SAVE_BACKUP_KEEP`); manual copies and folders the port did not
+  write are never removed.
+- **The card is never touched** by this; the copy is made from the file the IOP already wrote through. A failed copy is a notice
+  on screen and a `[gow-save] backup failed` line, and the game carries on.
+- **Checked in game** (Windows, a private copy of a PCSX2 card): load at the Fortress of Athens altar, save, "Save Complete"; one
+  copy, byte-identical to the card afterwards, the original card unchanged.
+- **Restoring** is done from the launcher's Saves tab with the game closed (the runtime keeps the image in memory): the card it
+  replaces goes to the history first (`source: before-restore`).
+
+The same signal is a fixed point to correlate the open hang after saving with (`STATUS.md`): the animation loop that spins
+afterwards runs after this call returned.
+
 ## Not verified
 
 - **The game formatting a blank card.** The installer avoids it by creating the card formatted.

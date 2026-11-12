@@ -41,7 +41,7 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 | `PC_WIDESCREEN=<aspect>` | Hor+ widescreen patch at that aspect, `4:3 < aspect <= 4.0` (so `16:9`, `16:10|21:9|32:9``, `21:9` and `32:9`; `4:3` or anything wider, such as `48:9`, leaves it off). Absent = the game's 4:3 |
 | `PC_FILTER=fsr\|bilinear\|pixel`, `PC_FXAA=1` | Filter *intent*; the runtime itself reads `GOW_SCALER` and `GOW_SHARPEN` |
 | `GOW_SCALER=sharp\|bilinear`, `GOW_SHARPEN` (0–1) | The scaler that actually runs: bicubic + contrast-adaptive sharpening, or a linear tap |
-| `PS2X_GS_HW_SCALE=<n>` | Internal render scale (float, clamped to ≥ 1). This is the one the runtime reads |
+| `PS2X_GS_HW_SCALE=<n>` | Internal render scale (float, 0.25 to the GPU's limit; below 1 the game is drawn smaller than the PS2 and stretched). This is the one the runtime reads |
 | `PS2X_GS_DIRECT_PRESENT=0` | Forces the RAM (readback + upload) presentation; shared GL textures are the default |
 | `PS2X_GS_FAIL_TEST=context\|shaders` | Test only: `GSHwBackend::ensure()` fails on purpose before touching GL, to see the on-screen renderer-failure message (English, or Portuguese when `PC_LANGUAGE` starts with `pt`); `GOW_HOST_SHOT=<frame>` writes `host_shot.png` |
 | `PS2X_GS_GL_MAX_MINOR=<3..6>` | Test only: the GS context ladder starts at OpenGL 4.<n> instead of 4.6 (then falls down to 4.3), to exercise the 4.3 path on a newer GPU. `[gs-gl]` in the log reports the version obtained |
@@ -59,6 +59,7 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 |---|---|
 | `PS2X_GS_WORKER=1` | VIF1/VU1/GIF on the GS worker thread. **Required for real-time audio and speed** |
 | `GOW_GS_FINISH_ASYNC=1` | GS FINISH does not block the EE |
+| `GOW_FX_SHADOWS=0`, `GOW_FX_ADDITIVE=0`, `GOW_FX_FILTER=0` | Effect switches for weak GPUs (Performance tab): no character shadow volumes, no additive 3D effects (fire, glows, particles), nearest texture sampling. On by default; see [`RENDERING.md`](RENDERING.md#7-internal-scale-below-1x-and-effect-switches) |
 | `GOW_GS_EARLY_FINISH=0` | Turns off early FINISH (on by default with the worker): the frame's FINISH is then given when the GS reaches it ([`RENDERING.md`](RENDERING.md)) |
 | `GOW_STALL_DIAG=1` | While a game frame is more than 40 ms late, samples the main thread's live pc/ra; one `[gow-stall]` line per late frame with the gap, display swaps, VBlanks and the most frequent places |
 | `GOW_LOADER_DIAG=1` | Adds the level loader (0x185A20), its disc reads and the 989snd command count to the `[gow-hang]` report |
@@ -92,6 +93,8 @@ arrives as `GOW_SHARPEN` and the render scale as `PS2X_GS_HW_SCALE`.
 | `GOW_ISO=<file>` | Disc image to read from (otherwise the extracted files are used) |
 | `GOW_MC0`, `GOW_MC1` | Memory-card images; `GOW_MC0=0` empties slot 1 |
 | `GOW_SKIP_FMV=1` | Skips the game's movies (for load-time investigation) |
+| `GOW_MOVIE_EOF=0`, `GOW_MOVIE_EOF_WAIT_MS=<ms>` | Turns off the end-of-movie handling (`gow_movie.cpp`: the stream read reports the end of the file, the completion test waits for the decoder's last pictures, at most 1500 ms) |
+| `GOW_SAVE_BACKUP=0`, `GOW_SAVE_BACKUP_KEEP=<n>`, `GOW_SAVE_BACKUPS_DIR=<dir>`, `GOW_SAVE_DIAG=1` | Save history ([`MEMORY-CARD.md`](MEMORY-CARD.md#save-history)): off, how many automatic copies are kept (30; 0 keeps all), where they go (`<card folder>/save-backups`), and a `[gow-save]` line for every completed index write |
 | `GOW_FAST_BOOT=1` | Skips the entry animation |
 | `GOW_TEXTURE_REPLACE`, `GOW_TEXTURE_REPLACE_SYNC`, `GOW_TEXTURE_REPLACE_{CPU,GPU}_MB`, `GOW_TEXTURE_REPLACE_UPLOAD_MB`, `GOW_TEXTURE_REPLACE_DIAG` | Custom texture packs |
 | `GOW_PAD_TEST`, `GOW_PAD_TEST_NO_CAPTURE`, `GOW_PAD_SCRIPT`, `GOW_PAD_CAPTURES`, `GOW_PAD_LOG` | Automated pad input and GS frame captures |

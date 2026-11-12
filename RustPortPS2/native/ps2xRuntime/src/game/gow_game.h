@@ -69,9 +69,16 @@ namespace gow_game
     void gowMovieStreamService(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowMovieVideoRingWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowMovieNodata(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void gowMovieStreamRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x188848: the end of the file
+    void gowMovieTailAudio(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);  // 0x189A88: audio of the drain loop
+    void gowMovieCompletion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x189B00: last pictures
     void gowDiagBonusMovie(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowDiagStreamRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     size_t movieOverrideCount(); // entries of GOW_MOVIE_OVERRIDE
+
+    // ---- saves (gow_save.cpp) -----------------------------------------------------------------------------------------
+    void gowSaveWriteFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x22E800: observes a completed save
+    uint32_t gowSaveCompletedCount(); // saves the game completed in this session
 
     // ---- game logic rate (gow_logic_rate.cpp) ------------------------------------------------------------------------
     void gowLogicTimeStep(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);  // PC_LOGIC_FPS > 60 or GOW_HFPS_DIAG=1
