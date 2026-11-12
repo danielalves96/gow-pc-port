@@ -43,6 +43,26 @@ static void gowPgoSignalHandler(int) { g_pgoStopSignal = 1; }
 #include <chrono>
 #include <atomic>
 #include <thread>
+#include <bit>
+
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+extern "C"
+{
+    __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
+    __declspec(dllimport) int __stdcall GetProcessAffinityMask(void *process, unsigned long long *processMask, unsigned long long *systemMask);
+}
+#endif
+
+// GOW-Port: logical processors this process may run on (its affinity mask on Windows, so a run pinned with -Cores counts).
+static unsigned gowUsableProcessors()
+{
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+    unsigned long long process = 0, system = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0)
+        return static_cast<unsigned>(std::popcount(process));
+#endif
+    return std::max(1u, std::thread::hardware_concurrency());
+}
 #include <unordered_map>
 #include <sstream>
 #include <cstdio>
@@ -757,11 +777,19 @@ bool PS2Runtime::syncCoreSubsystems()
     // GOW-Port: each stream keeps its GIF cursor, even when another PATH interrupts it.
     m_gifArbiter.reset();
     // GOW-Port: with the GS worker, the GS frontend runs on its own stage thread behind VU1 (gs_stage.h).
+    // GOW-Port: by default the stage thread only runs where the process has a core for it (4 or more usable processors).
+    // On 2 cores, at 60 FPS with the launcher's environment (3 alternating pairs after a warm-up run), the frontend on the
+    // worker itself gave 52.6 -> 53.6 FPS, worst 5 s window 38.9 -> 40.7 and frames over 50 ms 72 -> 14: one heavy thread
+    // less to share two cores. PS2X_GS_PIPELINE=0/1 forces it.
     static const bool gsPipeline = []
     {
         const char *worker = std::getenv("PS2X_GS_WORKER");
         const char *pipeline = std::getenv("PS2X_GS_PIPELINE");
-        return worker && worker[0] == '1' && !(pipeline && pipeline[0] == '0');
+        if (!(worker && worker[0] == '1'))
+            return false;
+        if (pipeline && pipeline[0] != ' ')
+            return pipeline[0] != '0';
+        return gowUsableProcessors() >= 4u;
     }();
     if (!gsPipeline) // GOW-Port: the markers PS2Memory pushes go straight to the frontend (gs_stage.h)
         ps2_gs_stage::setDirect([this](GifPathId path, const uint8_t *data, uint32_t size)
