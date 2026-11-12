@@ -132,8 +132,8 @@ position only. Together ~13 % of the thread; the dispatch around them costs more
 
 | Commit | Change | Replay bench |
 |---|---|---|
-| `719372f` | FDIV/EFU retire inline in the native loop; a micro-memory change tests only the slots near the changed pairs | 0 differ; median -2.7 % |
-| `b5eb437`, `0258970` | a block that loops to itself, or whose next block is already set up, is entered again without the full dispatch (same per-block timing, history, flags and budget cut) | 0 differ, and the per-record hashes **with the final cycle count** (`ca74f55`) identical to the base: cycle-exact |
+| `8a5efd3` | FDIV/EFU retire inline in the native loop; a micro-memory change tests only the slots near the changed pairs | 0 differ; median -2.7 % |
+| `2047ba5`, `95751e2` | a block that loops to itself, or whose next block is already set up, is entered again without the full dispatch (same per-block timing, history, flags and budget cut) | 0 differ, and the per-record hashes **with the final cycle count** (`64d3229`) identical to the base: cycle-exact |
 | all, no PGO | | median 13.26 -> 12.71 ms (-4.1 %) |
 | all + the shipped runtime profile | | median 13.26 -> 12.15 ms (-8.4 %) |
 
@@ -146,7 +146,7 @@ changes of the same branch), launcher environment, 60 FPS, opening scene, 3 alte
 | 4 | 60.0 FPS; VU1 7.94, EE 4.55, GS 6.83 ms/frame (19.3 in all) | 60.0 FPS; VU1 5.89 (-26 %), EE 4.16 (-9 %), GS 3.66 (-46 %) ms/frame (13.7 in all, -29 %); every run of this branch below every base run on VU1 and GS |
 
 The first 4-core run of this branch had one 5 s window at 3.9 FPS with every thread slowed at once: the new GS queue producer
-lock polled with `sleep_for(50 us)` when contended (at least ~1 ms on Windows). Fixed in `ad827be` (futex-style wait); the
+lock polled with `sleep_for(50 us)` when contended (at least ~1 ms on Windows). Fixed in `b82fe98` (futex-style wait); the
 confirmation run above has no window below 59.9 FPS and no hitch over 100 ms after start-up. With 2 cores the game is still
 CPU-bound below 60 FPS: the next steps are the ones in the design note below plus fewer heavy threads competing.
 
@@ -174,9 +174,9 @@ and was by far the fastest, always variant A).
 | 2 cores, opening scene | FPS mean | worst 5 s window | p95 frame time | frames over 50 ms | hitches >= 100 ms per run |
 |---|---|---|---|---|---|
 | `d01ed93` (start) | 40.0 | 21.4 | 75.8 ms | 392 | 117-163 |
-| `6d19eca` (round 2) | 49.8 | 32.1 | 37.1 ms | 186 | 1 (start-up) |
-| `aa33f76` (+ the low-core policies) | 53.9 (vs 48.1 for `6d19eca` in the same series) | 38.9 | 32.0 ms | 81 | 1 |
-| `f9dbc76` (+ refreshed shipped profile, GS frontend on the worker below 4 processors), same series as the base | 53.4 (base 38.9) | 40.6 (base 20.2) | 30.1 ms (base 78.0) | 17 (base 426) | 1-2 (base 143-187) |
+| `99b04f3` (round 2) | 49.8 | 32.1 | 37.1 ms | 186 | 1 (start-up) |
+| `3c26ee9` (+ the low-core policies) | 53.9 (vs 48.1 for `99b04f3` in the same series) | 38.9 | 32.0 ms | 81 | 1 |
+| `f68a1eb` (+ refreshed shipped profile, GS frontend on the worker below 4 processors), same series as the base | 53.4 (base 38.9) | 40.6 (base 20.2) | 30.1 ms (base 78.0) | 17 (base 426) | 1-2 (base 143-187) |
 
 Internal scale 1x or 2x instead of 4x changes nothing on 2 cores (CPU-bound). Four cores keep a steady 60 FPS; against the
 base in the same final series the VU1 thread went 6.95 -> 5.78 ms per frame and the GS 5.92 -> 2.68 (EE about the same).
@@ -231,9 +231,9 @@ when it won:
 
 | Change | Result | Kept |
 |---|---|---|
-| GL state shadow (two thirds of the GL state calls elided) and a vertex ring buffer | 54.9 FPS without vs 54.5 with | no (reverted) |
-| Fused VU1 two-block cycles with the VU state in locals (exact, cycle-exact) | 55.5 without vs 55.0 with | no (reverted) |
-| Native VBlank wait (the hottest EE function is a busy wait) | 54.9 with vs 54.4 without: noise | no (reverted) |
+| GL state shadow (two thirds of the GL state calls elided) and a vertex ring buffer | 54.9 FPS without vs 54.5 with | no (not kept) |
+| Fused VU1 two-block cycles with the VU state in locals (exact, cycle-exact) | 55.5 without vs 55.0 with | no (not kept) |
+| Native VBlank wait (the hottest EE function is a busy wait) | 54.9 with vs 54.4 without: noise | no (not kept) |
 | EE codegen: lean pc for delay-slot entries and VU0 ops, grouped RAM range checks | 54.1 -> 54.4, frames over 50 ms 14 -> 8 | yes |
 | EE codegen: constant propagation through calls by pointer, direct call dispatch (-20 % static instructions in the hottest function) | 54.6 -> 53.9 | no (not merged) |
 | VU1 block chaining (blocks tail-call the next one with `preserve_none`, ~140 -> ~95 instructions of dispatch per block; exact, cycle-exact) | replay bench median 11.33 -> 11.59 ms | no (not merged) |
