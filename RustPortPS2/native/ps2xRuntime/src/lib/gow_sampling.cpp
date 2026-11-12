@@ -264,9 +264,36 @@ namespace
                 std::snprintf(access, sizeof(access), " %s 0x%llx", kind == 0 ? "reading" : kind == 1 ? "writing" : "executing",
                               static_cast<unsigned long long>(record->ExceptionInformation[1]));
             }
-            char line[384];
-            std::snprintf(line, sizeof(line), "[gow-crash] exception 0x%08lX at %s%s, thread %lu\n",
-                          static_cast<unsigned long>(record->ExceptionCode), where, access, static_cast<unsigned long>(GetCurrentThreadId()));
+            char line[1024];
+            int used = std::snprintf(line, sizeof(line), "[gow-crash] exception 0x%08lX at %s%s, thread %lu\n",
+                                     static_cast<unsigned long>(record->ExceptionCode), where, access, static_cast<unsigned long>(GetCurrentThreadId()));
+#if defined(_M_X64) || defined(__x86_64__)
+            // GOW-Port: the fault is often inside the C runtime (memcpy, memset): the words on the stack that point into the
+            // executable are the likely callers, newest first ("gow-2005+0x..." against llvm-nm or gow-2005.map).
+            if (info->ContextRecord && used > 0 && used < static_cast<int>(sizeof(line)))
+            {
+                const HMODULE exe = GetModuleHandleA(nullptr);
+                const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(exe);
+                const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(reinterpret_cast<const uint8_t *>(exe) + dos->e_lfanew);
+                const uintptr_t lo = reinterpret_cast<uintptr_t>(exe), hi = lo + nt->OptionalHeader.SizeOfImage;
+                used += std::snprintf(line + used, sizeof(line) - used, "[gow-crash] stack (exe words):");
+                const auto *sp = reinterpret_cast<const uintptr_t *>(info->ContextRecord->Rsp);
+                unsigned found = 0;
+                for (unsigned k = 0; k < 512u && found < 16u && used < static_cast<int>(sizeof(line)) - 32; ++k)
+                {
+                    uintptr_t word = 0;
+                    if (!ReadProcessMemory(GetCurrentProcess(), sp + k, &word, sizeof(word), nullptr))
+                        break;
+                    if (word > lo && word < hi)
+                    {
+                        used += std::snprintf(line + used, sizeof(line) - used, " +0x%llx", static_cast<unsigned long long>(word - lo));
+                        ++found;
+                    }
+                }
+                if (used < static_cast<int>(sizeof(line)) - 1)
+                    used += std::snprintf(line + used, sizeof(line) - used, "\n");
+            }
+#endif
             crashReport(line);
         }
         return EXCEPTION_CONTINUE_SEARCH;
