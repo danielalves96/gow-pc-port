@@ -35,7 +35,7 @@ capture and rebuild. Each step is skipped if it is already done, so re-running i
 
 ## The shipped speed profile
 
-Clang builds use PGO. `RustPortPS2/native/pgo/runtime.profdata` (2.3 MB, `*.profdata` is binary in `.gitattributes`) is the
+Clang builds use PGO. `RustPortPS2/native/pgo/runtime.profdata` (about 4 MB, `*.profdata` is binary in `.gitattributes`) is the
 profile every clang build uses by default (`PS2X_PGO=auto` in `CMakeLists.txt`: GCC and MSVC ignore it; the installers pass
 `shipped`, `use`, `generate` or `off` explicitly). It was made from a full profile trained on the opening scene, keeping only
 this repository's own runtime and dropping everything derived from the game, so it can live in the repository and the
