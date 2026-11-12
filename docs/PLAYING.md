@@ -156,6 +156,9 @@ If you prefer the original timing, turn the switch off.
   input moved, so no numbers have to be typed. **Start** is required. The mapping applies the next time the game starts.
 - **Vibration works on Windows only**: the Linux build has no rumble.
 - Only port 1 is connected: the game's second controller slot does nothing.
+- **The screen stays on while you play** (Windows): Windows counts only the keyboard and the mouse as activity, so a long
+  stretch with a controller used to turn the display off. The game asks Windows to keep the display on while its window is
+  on screen, and lets go while it is minimized. `GOW_KEEP_AWAKE=0` turns this off.
 
 ## Saves and the memory card
 

@@ -74,6 +74,7 @@ nativas das bibliotecas que ele chama.
   tela cheia.
 - **Saves** - cartão `Mcd001.ps2` compatível com o PCSX2, nos dois sentidos. Uma cópia datada do cartão é guardada a cada save num altar. A aba Saves do launcher mostra cada save com o altar, a miniatura, a dificuldade e o tempo de jogo, carrega um deles mesmo com o jogo aberto e restaura uma cópia.
 - **Texturas personalizadas** - packs de substituição do PCSX2, com o pack da comunidade baixável pelo launcher.
+- **Steam e atalhos**: o launcher pode abrir o jogo direto, sem a janela dele, e fechar junto com o jogo, então dá para adicioná-lo à Steam como jogo não Steam ([`docs/LAUNCHER.md`](docs/LAUNCHER.md#starting-the-game-without-the-launcher)).
 - **RetroAchievements** - login, notificações no jogo e modo hardcore que desativa os cheats.
 - **Launcher** - nove abas, assistente de instalação, otimização em segundo plano, inglês e português do Brasil.
 

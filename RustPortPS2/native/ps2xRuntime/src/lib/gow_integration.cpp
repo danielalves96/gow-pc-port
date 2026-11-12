@@ -1135,8 +1135,39 @@ static void gowApplyFrameSettings()
     std::fprintf(stderr, "[gow-frame] VSync %s (changed in game)\n", wanted ? "on" : "off");
 }
 
+#if defined(_WIN32)
+// Declared here: <windows.h> clashes with raylib's names (CloseWindow, DrawText, ShowCursor...). In kernel32, linked by default.
+extern "C" __declspec(dllimport) unsigned long __stdcall SetThreadExecutionState(unsigned long flags);
+extern "C" __declspec(dllimport) int __stdcall IsIconic(void *window); // user32, linked by GLFW
+#endif
+
+// GOW-Port: keeps the display (and the PC) awake while the game is on screen. Windows counts only the keyboard and the mouse
+// as activity, never a gamepad, so a long stretch with a controller turned the screen off mid-game. Released while the
+// window is minimized, so a game left in the background does not keep the PC awake. GOW_KEEP_AWAKE=0 turns it off.
+// Called once per presented frame from the window thread: the request belongs to the thread that made it.
+static void gowKeepDisplayAwake()
+{
+#if defined(_WIN32)
+    static const bool enabled = envFlag("GOW_KEEP_AWAKE", true);
+    static int held = -1; // -1 = not decided yet
+    if (!enabled)
+        return;
+    // Windows itself is asked: raylib's IsWindowMinimized() did not change when the window was minimized in this runtime.
+    void *window = GetWindowHandle(); // the HWND on Windows
+    const int wanted = (window && IsIconic(window)) ? 0 : 1;
+    if (wanted == held)
+        return;
+    constexpr unsigned long kContinuous = 0x80000000UL, kSystemRequired = 0x1UL, kDisplayRequired = 0x2UL;
+    const bool ok = SetThreadExecutionState(wanted ? (kContinuous | kSystemRequired | kDisplayRequired) : kContinuous) != 0;
+    held = wanted;
+    std::cout << "[gow-awake] " << (wanted ? "display kept on while the game is on screen" : "released (window minimized)")
+              << (ok ? "" : " (Windows refused the request)") << std::endl;
+#endif
+}
+
 void gowFrameInput()
 {
+    gowKeepDisplayAwake();
     if (IsKeyPressed(KEY_F11))
         toggleFullscreen();
     gowApplyFrameSettings();             // the VSync chosen in the menus

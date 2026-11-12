@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod controller;
 pub mod credential;
+pub mod direct;
 pub mod display;
 pub mod elf_check;
 pub mod failure;

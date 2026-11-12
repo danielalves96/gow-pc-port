@@ -4,7 +4,7 @@
 import type {
   BuildActivity, Bootstrap, CardSlot, SaveArt, SaveBackup, DestinationValidation, GameFinished, GameStatus, GamepadCaptured, InstallOutcome,
   ChdOutcome, ChdPlan, InstallProgress, IsoValidation, LiveState, PatchError, PatchOutcome, OptimizerSnapshot, PadDeviceList, RebuildState, Settings, TexturePackInfo, TexturePackOutcome, TexturePackProgress,
-  UpdateMode, UpdateState, WizardInfo,
+  StartNotice, UpdateMode, UpdateState, WizardInfo,
 } from './types';
 
 export interface EventMap {
@@ -27,6 +27,7 @@ export interface EventMap {
   'texture-pack-done': TexturePackOutcome;
   /** The window was asked to close while a texture pack is installing; it stayed open. */
   'close-blocked': undefined;
+  'start-notice': StartNotice;
   optimizer: OptimizerSnapshot;
   'update-state': UpdateState;
 }
@@ -40,6 +41,8 @@ export interface PickOptions {
 
 export interface Api {
   bootstrap(locale: string): Promise<Bootstrap>;
+  /** The first screen with data is drawn: the backend logs how long the start took (`logs/launcher-startup.log`). */
+  startupReady(scriptMs: number, bootMs: number): Promise<void>;
   patchSettings(patch: Partial<Settings>): Promise<Settings>;
   resetGameOptions(): Promise<Settings>;
   gameStatus(): Promise<GameStatus>;
@@ -126,14 +129,18 @@ export interface Api {
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 async function createTauriApi(): Promise<Api> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  const { listen } = await import('@tauri-apps/api/event');
-  const { getCurrentWindow } = await import('@tauri-apps/api/window');
-  const { getCurrentWebview } = await import('@tauri-apps/api/webview');
-  const { open } = await import('@tauri-apps/plugin-dialog');
+  // GOW-Port: fetched together, not one after the other: each is a request to the app's own protocol at start-up.
+  const [{ invoke }, { listen }, { getCurrentWindow }, { getCurrentWebview }, { open }] = await Promise.all([
+    import('@tauri-apps/api/core'),
+    import('@tauri-apps/api/event'),
+    import('@tauri-apps/api/window'),
+    import('@tauri-apps/api/webview'),
+    import('@tauri-apps/plugin-dialog'),
+  ]);
   const call = <T,>(command: string, args?: Record<string, unknown>) => invoke<T>(command, args);
   return {
     bootstrap: (locale) => call('bootstrap', { locale }),
+    startupReady: (scriptMs, bootMs) => call('startup_ready', { scriptMs, bootMs }),
     patchSettings: (patch) => call('patch_settings', { patch }),
     resetGameOptions: () => call('reset_game_options'),
     gameStatus: () => call('game_status'),
@@ -216,7 +223,7 @@ export const defaultSettings: Settings = {
   filter: 'bilinear', sharpness: 0.8, fxaa: true, brightness: 50, contrast: 50, gamma: 50, saturation: 50, progressive480p: true, internalResolution: '2', fpsLimit: 60,
   vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, fxShadows: true, fxAdditive: true, fxFilter: true, elf: '', iso: '', executable: '', skipVideos: true, fastBoot: false, customTextures: false, asyncTextures: true,
   settingsVersion: 0, dmc5Controls: false, padButtons: '', padMap: '', padDevice: '', padDeviceName: '', padSdlMap: '', cancelAnimations: true, escQuits: false,
-  minimizeOnPlay: true, secondsPlayed: 0, lastSession: 0, keys: '', cheats: '', cheatsShortcut: '',
+  minimizeOnPlay: true, skipLauncher: false, secondsPlayed: 0, lastSession: 0, keys: '', cheats: '', cheatsShortcut: '',
   retroAchievementsEnabled: false, retroAchievementsUser: '',
   retroAchievementsHardcore: false, retroAchievementsNotifications: true, optimizationDestination: '',
   optimizationEnabled: true, optimizeDuringGame: true, optimizationCompiled: 0,
@@ -307,6 +314,8 @@ export function createMockApi(
     build?: 'working' | 'quiet' | 'stuck';
     /** The saves on the demo card and what the disc says about them. */
     saves?: { slots: CardSlot[]; art: SaveArt };
+    /** Why the window opened after a direct start (issue #40). */
+    notice?: StartNotice;
   } = {},
 ): MockApi {
   const ready = options.ready ?? true;
@@ -360,6 +369,7 @@ export function createMockApi(
 
   return {
     emit,
+    startupReady: async () => undefined,
     bootstrap: async () => ({
       settings, version: '0.4.0-rc', platform: 'windows', display,
       graphicsCards: [
@@ -368,6 +378,8 @@ export function createMockApi(
       ],
       dataDirectory: 'C:\\Users\\player\\AppData\\Roaming\\GOW_PC\\Launcher',
       arguments: { play: false, wizard: false },
+      launcherPath: 'C:\\Users\\player\\AppData\\Local\\God Of War - PC Launcher\\gow-launcher.exe',
+      notice: options.notice ?? null,
     }),
     patchSettings: async (patch) => merge(patch),
     resetGameOptions: async () => merge({ gpu: 'auto', displayMode: 'fullscreen', filter: 'bilinear', sharpness: 0.8, fxaa: true, brightness: 50, contrast: 50, gamma: 50, saturation: 50, internalResolution: '2', fpsLimit: 60, vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, fxShadows: true, fxAdditive: true, fxFilter: true, cheats: '', cheatsShortcut: '' }),

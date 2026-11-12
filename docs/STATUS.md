@@ -78,6 +78,17 @@ Last reviewed: October 2026, against the code in this repository.
   checked:** the F2 page with a real keyboard or gamepad (its drawing and the request path were), a request during a movie,
   a level load or the save screen, a CHD install (the page falls back to the zone code), Linux. Details in
   [`dev/MEMORY-CARD.md`](dev/MEMORY-CARD.md#loading-a-slot-from-outside-the-games-menus).
+- **Launcher start-up, direct start and downloads** (Windows, a launcher release build with its own data folder): the window
+  was ready in 0.41 to 0.44 s instead of 14.5 to 30.6 s with 414,000 captured microprograms (the count no longer runs before
+  the window, nor once per file). With **Start the game directly** (issue #40) the game opened 18 ms after the launcher started,
+  without WebView2, and the launcher ended with it; failures, `--launcher` and a missing installation opened the window. The
+  installer's downloads (issue #39) were each checked with the four ways (`Invoke-WebRequest`, `HttpClient`, `curl.exe`, BITS),
+  the fallback when the first fails, and a file saved by hand. **Not checked:** Steam itself (overlay, Steam Input), Shift held at
+  start, a full installation on a PC where `Invoke-WebRequest` fails, Linux. Details in [`LAUNCHER.md`](LAUNCHER.md#starting-the-game-without-the-launcher).
+- **Display kept on during play** (Windows): the game holds a keep-awake request while its window is on screen
+  (`[gow-awake]`); the log showed it taken at start, released when the window was minimized and taken again when it was
+  restored. **Not checked:** an idle timeout actually reached with a controller in hand (the request was seen in the log, not
+  in `powercfg /requests`, which needs administrator rights), Linux (nothing is done there yet).
 
 - **Hang after saving (Windows):** after a save completes, a sequence of events can freeze the game. It was first
   traced to the VIF/DMA path; a 0.3.2 sample (clang build with the speed profile, early FINISH on) instead shows the game

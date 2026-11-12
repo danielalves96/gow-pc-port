@@ -228,7 +228,7 @@ automatically**).
 | `vu1_captures/` | VU1 micro-memory images (16 KB each) that let the vector unit run native code |
 | `build-rust/` | `ps2_recomp` and `ps2-tools` when they were built from source |
 | `textures/replacements/` | Where a custom texture pack goes ([`TEXTURES.md`](TEXTURES.md)) |
-| `toolchain/` | Portable Git, CMake and Ninja (Windows only, each only when the PC lacked a usable one) |
+| `toolchain/` | Portable Git, CMake and Ninja (Windows only, each only when the PC lacked a usable one), and the compiler. A download that fails every way names the file to save here by hand (see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md#installation)) |
 | `RustPortPS2/native/ps2xRuntime/src/runner/` | The generated C++ of the game. **Always in the repository**, even with `-Destination` |
 
 On Windows, `build\ps2xRuntime\game-elf.sha256` records which ELF the build belongs to; the launcher checks it before

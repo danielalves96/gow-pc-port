@@ -174,10 +174,79 @@ $Toolchain = Join-Path $DataRoot 'toolchain'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-function Download([string]$url, [string]$target) {
+# GOW-Port (issue #39): every download goes through Fetch. Invoke-WebRequest alone failed on a player's PC for every tool at
+# once with "The system cannot find the file specified" (a Windows error, not a network one) while the Internet worked, so
+# one broken component of Windows PowerShell's web stack ended the installation. Fetch tries four independent ways in turn:
+# Invoke-WebRequest, .NET's HttpClient, the curl.exe that ships with Windows 10 1803 and later, and BITS; each result is
+# checked against its SHA-256 when one is pinned. A file the player downloaded with a browser and saved at the path the
+# error names is used as it is (after the same check), so a PC where nothing can download still installs.
+function FileSha256([string]$file) { (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash }
+function FetchWith([string]$method, [string]$url, [string]$target) {
+    switch ($method) {
+        'Invoke-WebRequest' { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $target }
+        'HttpClient' {
+            Add-Type -AssemblyName System.Net.Http
+            $client = New-Object System.Net.Http.HttpClient
+            $client.Timeout = [TimeSpan]::FromMinutes(30)
+            try {
+                $response = $client.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+                [void]$response.EnsureSuccessStatusCode()
+                $source = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                $file = [IO.File]::Create($target)
+                try { $source.CopyTo($file) } finally { $file.Dispose(); $source.Dispose() }
+            }
+            finally { $client.Dispose() }
+        }
+        'curl' {
+            $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+            if (-not (Test-Path -LiteralPath $curl)) { throw 'curl.exe is not part of this Windows' }
+            # Its messages go to a file: native stderr would stop the script under $ErrorActionPreference = 'Stop'.
+            $log = "$target.curl.txt"
+            & $curl --fail --location --silent --show-error --retry 2 --connect-timeout 30 --output $target --stderr $log $url
+            $code = $LASTEXITCODE
+            # An empty file reads as nothing in Windows PowerShell, even cast to [string]: interpolation always gives a string.
+            $message = if (Test-Path -LiteralPath $log) { "$(Get-Content -LiteralPath $log -Raw)".Trim() } else { '' }
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+            if ($code -ne 0) { throw "curl.exe ended with code $code $message" }
+        }
+        'BITS' {
+            Import-Module BitsTransfer -ErrorAction Stop
+            Start-BitsTransfer -Source $url -Destination $target -ErrorAction Stop
+        }
+    }
+}
+function Fetch([string]$name, [string]$url, [string]$target, [string]$sha256 = '') {
     New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
-    try { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $target }
-    catch { Fail "Could not download $url ($($_.Exception.Message)). Check the Internet connection." }
+    if (Test-Path -LiteralPath $target) {
+        if (-not $sha256 -or (FileSha256 $target) -eq $sha256) {
+            Write-Host "Using $target, already on this PC."
+            return
+        }
+        Remove-Item -LiteralPath $target -Force
+    }
+    $failures = @()
+    foreach ($method in @('Invoke-WebRequest', 'HttpClient', 'curl', 'BITS')) {
+        try {
+            FetchWith $method $url $target
+            if (-not (Test-Path -LiteralPath $target)) { throw 'no file was written' }
+            if ($sha256) {
+                $actual = FileSha256 $target
+                if ($actual -ne $sha256) { throw "not the expected file (SHA-256 $actual, expected $sha256)" }
+            }
+            if ($failures.Count -gt 0) { Write-Host "Downloaded $name with $method." }
+            return
+        }
+        catch {
+            $failures += "${method}: $($_.Exception.Message)"
+            Write-Host "  $name with ${method} failed: $($_.Exception.Message)"
+            if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    throw "Could not download $name ($($failures -join '; ')). Check the Internet connection, or download $url with a browser, save it as $target and run the installation again"
+}
+function Download([string]$url, [string]$target, [string]$sha256 = '') {
+    try { Fetch (Split-Path $target -Leaf) $url $target $sha256 }
+    catch { Fail "$($_.Exception.Message)." }
 }
 function FindVs {
     $vw = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -196,7 +265,8 @@ function GetPortableGit {
         $v = '2.47.1'
         $zip = Join-Path $Toolchain "MinGit-$v-64-bit.zip"
         Step "Downloading portable Git $v (about 50 MB)"
-        Download "https://github.com/git-for-windows/git/releases/download/v$v.windows.1/MinGit-$v-64-bit.zip" $zip
+        Download "https://github.com/git-for-windows/git/releases/download/v$v.windows.1/MinGit-$v-64-bit.zip" $zip `
+            '50B04B55425B5C465D076CDB184F63A0CD0F86F6EC8BB4D5860114A713D2C29A'
         Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
         Remove-Item -LiteralPath $zip -Force
     }
@@ -404,9 +474,7 @@ function GetPortableTool([string]$name, [string]$url, [string]$sha256, [string]$
     try {
         New-Item -ItemType Directory -Force -Path $Toolchain | Out-Null
         Step "Downloading portable $name"
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
-        $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-        if ($actual -ne $sha256) { throw "SHA-256 mismatch for $name ($actual, expected $sha256)" }
+        Fetch $name $url $zip $sha256.ToUpperInvariant()
         if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
         Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
         if (-not (Test-Path -LiteralPath $exe)) { throw "$exe is missing after extracting $name" }
@@ -499,9 +567,7 @@ function UsePortableClang {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         try {
             Step "Downloading the compiler (llvm-mingw $ClangVersion, about 170 MB$(if ($attempt -gt 1) { ', second attempt' }))"
-            Invoke-WebRequest -UseBasicParsing -Uri $ClangUrl -OutFile $zip
-            $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-            if ($actual -ne $ClangSha256) { throw "the download is not the expected file (SHA-256 $actual, expected $ClangSha256)" }
+            Fetch "the compiler (llvm-mingw $ClangVersion)" $ClangUrl $zip $ClangSha256
             Write-Host 'Unpacking the compiler...'
             if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
             ExpandZipFiltered $zip $dir @('*/aarch64-w64-mingw32/*', '*/armv7-w64-mingw32/*', '*/i686-w64-mingw32/*', '*/python/*')
@@ -513,7 +579,7 @@ function UsePortableClang {
         catch { $lastError = $_.Exception.Message }
         finally { if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue } }
     }
-    Fail "Could not set up the compiler: $lastError. Check the Internet connection (github.com must be reachable) and run the installation again; finished steps are kept. A complete package with the compiler inside is also published with each release."
+    Fail "Could not set up the compiler: $lastError. Finished steps are kept when the installation runs again."
 }
 $ClangBin = $null
 if ($Compiler -eq 'clang') {

@@ -55,6 +55,8 @@ export interface Settings {
   cancelAnimations: boolean;
   escQuits: boolean;
   minimizeOnPlay: boolean;
+  /** Opening the launcher opens the game without the window (Shift or `--launcher` shows it). */
+  skipLauncher: boolean;
   secondsPlayed: number;
   lastSession: number;
   keys: string;
@@ -139,6 +141,15 @@ export interface Bootstrap {
   graphicsCards: GraphicsCard[];
   dataDirectory: string;
   arguments: { play: boolean; wizard: boolean };
+  /** The launcher's own executable (for Steam's "Add a Non-Steam Game"). */
+  launcherPath: string;
+  /** Why the window opened after a direct start (issue #40): the game failed to start, or started and closed with an error. */
+  notice: StartNotice | null;
+}
+
+export interface StartNotice {
+  finished: GameFinished | null;
+  launchError: LaunchError | null;
 }
 
 export interface GameState {

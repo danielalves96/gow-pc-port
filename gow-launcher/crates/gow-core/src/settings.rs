@@ -81,6 +81,9 @@ pub struct Settings {
     pub cancel_animations: bool,
     pub esc_quits: bool,
     pub minimize_on_play: bool,
+    /// Opening the launcher starts the game without the window (issue #40; see `direct`). Shift while it opens, or
+    /// `--launcher`, shows the window.
+    pub skip_launcher: bool,
     pub seconds_played: u64,
     pub last_session: u64,
     /// Key map in JSON (empty = default scheme).
@@ -148,6 +151,7 @@ impl Default for Settings {
             cancel_animations: true,
             esc_quits: false,
             minimize_on_play: true,
+            skip_launcher: false,
             seconds_played: 0,
             last_session: 0,
             keys: String::new(),

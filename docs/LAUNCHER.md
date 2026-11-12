@@ -150,7 +150,8 @@ be saved. Hardcore disables all cheats. See [`PLAYING.md`](PLAYING.md#achievemen
 ### Other
 
 Language (English / Brazilian Portuguese), **Skip FMV videos**, **Fast boot** (cuts the intro animation and may cut the
-opening lines; not recommended), **Minimize the launcher while playing**, **Automatic updates** (off by default, see
+opening lines; not recommended), **Minimize the launcher while playing**, **Start the game directly** and **Steam** (see
+[Starting the game without the launcher](#starting-the-game-without-the-launcher)), **Automatic updates** (off by default, see
 [Updating the launcher](#updating-the-launcher)), shortcuts, **Last game log**, **Session report** and **Mark a problem** (see [Reports](#reports)), **Restore defaults** (resets graphics,
 performance, controls and cheats; your file paths and the button layout you built for a controller the system does not know are kept) and the About box.
 
@@ -198,6 +199,7 @@ The data folder is `%APPDATA%\GOW_PC\Launcher` on Windows and `~/.local/share/GO
 | Last game log (stdout + stderr) | `logs/last.log` (the previous run becomes `logs/previous.log`) |
 | Installer and optimizer logs | `logs/install.log`, `logs/optimize.log` |
 | Launcher update checks and installs | `logs/update.log` |
+| How long each start of the launcher took, and direct starts | `logs/launcher-startup.log` |
 | Installation kit shipped with the launcher | `kit/` in the data folder |
 | Kit repairs (a file that went missing and was restored) | `logs/kit.log` |
 | Last game session (how it ended) and your problem markers | `logs/last-session.json`, `logs/markers.jsonl` |
@@ -223,6 +225,35 @@ configured.
 4. On exit you get the session length, or an error with the last lines of the log and a button to open it.
 
 The launcher also pauses a background rebuild while the game is running, and resumes it afterwards.
+
+## Starting the game without the launcher
+
+For Steam, or a shortcut that should open the game itself. The launcher still does the work of PLAY (the settings become the
+game's environment, the session and play time are recorded, the optimizer pauses), but its window is never created, so
+WebView2 never starts: the game opens a few milliseconds after the launcher. The launcher closes when the game closes, so
+Steam sees the session end.
+
+- **Other → Start the game directly**: every start of the launcher opens the game. **Hold Shift** while opening it to get
+  the window (Windows), or start it with `--launcher`.
+- **`--play`** does the same for one start, whatever the setting (the "Play now" action of the Linux menu entry uses it).
+- **Steam**: Games > Add a Non-Steam Game, then **Browse** to the launcher (**Other → Steam → Copy path** puts its path
+  on the clipboard). With **Start the game directly** on nothing else is needed; otherwise put `--play` in the entry's
+  launch options.
+- The window opens instead, with the reason, when the game cannot start: not installed (the wizard), a launch error, or a game
+  that closed with an error (the same dialog as after PLAY). A window opened during such a session (starting the launcher
+  again) can be closed: the launcher waits for the game before it ends.
+- A second start while the launcher is open hands its arguments to the open one: `--play` opens the game there.
+
+`logs/launcher-startup.log` (the newest 200 lines) records each start: when the interface was ready and where the time
+went (`setup` before the window, `page script` for WebView2 and the interface, `first calls`), or when a direct start opened
+the game.
+
+**Checked** (Windows, a private copy of a card): with the setting on, the game opened 18 ms after the launcher started, no
+WebView2 process was created, and the launcher ended with code 0 when the game window was closed, with the session added to the
+play time; a game killed mid-session opened the window with the failure dialog; `--launcher` and an installation that is not
+ready opened the window (the second one in the wizard); `--play` given to a second start opened the game from the launcher
+already open. **Not checked**: Steam itself (the overlay and Steam Input on the game started by the launcher), Shift held
+while opening (the key is read with `GetAsyncKeyState`), Linux.
 
 ## Installing the launcher
 
