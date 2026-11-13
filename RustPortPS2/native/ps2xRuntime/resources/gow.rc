@@ -14,9 +14,9 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "FileDescription", "God of War (2005) native port"
-            VALUE "FileVersion", "0.4.0-rc"
+            VALUE "FileVersion", "0.4.0"
             VALUE "ProductName", "God of War (2005) native port"
-            VALUE "ProductVersion", "0.4.0-rc"
+            VALUE "ProductVersion", "0.4.0"
             VALUE "InternalName", "gow-2005"
             VALUE "OriginalFilename", "gow-2005.exe"
         END

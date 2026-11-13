@@ -28,7 +28,7 @@ body:
     attributes:
       label: Launcher version and system
       description: The version is in Other, About. Say Windows or Linux and which one.
-      placeholder: "0.4.0-rc, Windows 11"
+      placeholder: "0.4.0, Windows 11"
     validations:
       required: true
   - type: textarea

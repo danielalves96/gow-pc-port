@@ -67,7 +67,7 @@ synthetic fixture in CI and on the retail ELF locally (`RustPortPS2/docs/PARITY.
 - The goal is a steady 60 FPS without stutter on any PC, the weakest included. Nothing in the project runs the game or its
   window above **120 FPS**: the runtime (`kMaxFps` in `ps2xRuntime/src/lib/gow_frame.h`: `PC_LOGIC_FPS` and
   `PC_WINDOW_FPS` are capped there, and `PC_WINDOW_FPS=0` no longer means unlimited), the launcher (`MAX_FPS` in
-  `gow-launcher/crates/gow-core/src/launch.rs`: limits 60 and 120, the window at the display's rate up to 120), the
+  `gow-launcher/crates/gow-core/src/launch.rs`: limits 60 and 120; the window at 60 with the 60 limit, at the display's rate up to 120 with the 120 one), the
   in-game Frame Rate page (60 / 120) and every test or measurement.
 - No "uncapped" tests either: `scripts/ab-perf.ps1` refuses `PC_LOGIC_FPS` above 120 and `PC_WINDOW_FPS` of 0 or above 120.
   Uncapped runs kept the GPU at 100 % until the AMD OpenGL driver crashed (`atio6axx.dll`) and measure nothing a player

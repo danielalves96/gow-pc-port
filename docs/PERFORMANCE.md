@@ -8,7 +8,7 @@ in slow motion either. A late frame is dropped, not stretched.
 
 The **FPS limit** in the launcher (60 / 120) is the game's real frame rate. 60 is the PS2's own. At 120 the game logic
 itself runs 120 frames per second, each one a shorter step of time, so the game gets smoother without getting faster. A
-PC that cannot reach the limit simply shows fewer frames. The window refreshes at the monitor's rate, at most 120.
+PC that cannot reach the limit simply shows fewer frames. At the 60 limit the window follows the game's own frames; at 120 it refreshes at the monitor's rate, at most 120.
 Nothing runs above 120 FPS: the goal is a steady 60 on any PC, and higher rates only kept the GPU at 100 % (on one AMD
 card, until its OpenGL driver crashed). Some actions timed in frames (quick-time events, combo windows) may feel different
 above 60: go back to 60 if anything seems off. The counter shows that one real frame rate.

@@ -179,8 +179,8 @@ Everything else (the full cheat list, target lock rules, agile combat, memory ca
 ## Performance
 
 The game runs at 60 FPS by default, the PS2's own rate, always at real-time speed: late frames are dropped, never slowed
-down. The launcher's 120 FPS limit runs the game logic at that rate, smoother but never faster; the window refreshes at
-the monitor's rate, at most 120. Nothing runs above 120 FPS: past it a weak PC gets no smoother, only hotter.
+down. The launcher's 120 FPS limit runs the game logic at that rate, smoother but never faster; at 60 the window follows the game's own
+frames, at 120 it refreshes at the monitor's rate, at most 120. Nothing runs above 120 FPS: past it a weak PC gets no smoother, only hotter.
 
 - **Internal resolution 2× is the sweet spot.** 3× and above are heavy and, on mid-range cards, can stall the
   presentation.

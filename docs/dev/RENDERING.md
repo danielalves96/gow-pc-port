@@ -141,7 +141,9 @@ above 120, `kMaxFps` in `lib/gow_frame.h`, and a higher value gets 120) runs the
 fields, so the game keeps real-time speed); the launcher's FPS limit (60 / 120) sets it. With it, `GSHostPresentation::prepare` latches a new picture on each game buffer swap
 (`gowGameFlipCount`, counted by the display setup) and on the VBlank only after two VBlanks without a swap; at 60 it
 latches on each VBlank. `PC_WINDOW_FPS` (60 by default, clamped to 30–120; 0, which used to mean unlimited,
-gives 120) sets the host loop's `SetTargetFPS`; the launcher passes the display's refresh rate, at most 120. `PC_VSYNC=1` requests the vsync hint instead.
+gives 120) sets the host loop's `SetTargetFPS`; the launcher passes 60 with the 60 limit (the loop then follows the game's VBlank, `hostSyncToVBlank`) and the display's
+refresh rate, at most 120, with the 120 one. `PC_VSYNC=1` requests the vsync hint instead, honoured only on a display of 120 Hz
+or less (`applyWindowVsync`): with it the timer follows the display, above that the window follows the game's VBlank.
 
 ## 3. Texture replacement
 

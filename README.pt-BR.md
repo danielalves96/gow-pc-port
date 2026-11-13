@@ -185,7 +185,7 @@ O resto - lista completa de cheats, regras da mira travada, combate ágil, cart�
 
 O jogo roda a 60 FPS por padrão, a taxa do próprio PS2, sempre na velocidade real: quadros atrasados são descartados,
 nunca desacelerados. O limite de 120 FPS do launcher roda a lógica do jogo nessa taxa, mais fluido mas nunca mais rápido;
-a janela atualiza na taxa do monitor, no máximo 120. Nada roda acima de 120 FPS: além disso um PC fraco não fica mais
+em 60 a janela segue os quadros do próprio jogo, em 120 atualiza na taxa do monitor, no máximo 120. Nada roda acima de 120 FPS: além disso um PC fraco não fica mais
 fluido, só mais quente.
 
 - **Resolução interna 2× é o ponto ideal.** 3× ou mais é pesado e, em placas intermediárias, pode travar a apresentação.
