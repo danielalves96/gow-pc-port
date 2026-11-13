@@ -9,9 +9,11 @@
 #                    wizard uses it; the generated C++ still lands inside RustPortPS2/native.
 #   --jobs N         build processes (default: cores minus a reserve of 2, 1 or 0, at most one per 2 GB of RAM).
 #   --compiler       C++ compiler: g++ (default) or clang (clang++). Also settable via CXX=clang++ or GOW_COMPILER=clang.
-#   --pgo auto|on|off  speed profile (clang only): auto (default: use an existing profile if present), on (train it in the
-#                    optimization run and rebuild with it), or off. Also settable via GOW_PGO=auto|on|off.
-#   --retrain-pgo    train the speed profile again even when build/pgo/gow.profdata already exists.
+#   --pgo auto|on|off  speed profile (clang only; g++ ignores it): auto (default: the profile trained on this PC if present, else
+#                    the runtime-only profile shipped in RustPortPS2/native/pgo/, which holds nothing from the game, so the
+#                    installation never opens the game by itself), on (also train the full profile in the optimization run
+#                    and rebuild with it), or off (none). Also settable via GOW_PGO=auto|on|off.
+#   --retrain-pgo    train the full speed profile again even when build/pgo/gow.profdata already exists.
 #   --vu1-memory-limit-gb N  RAM budget for the VU1 AOT generator in GB (default: 4, 0 = unlimited; same as install.ps1).
 #   --normal-priority  do not lower the CPU and I/O priority of the long steps (nice, ionice); by default they run lowered so the
 #                    PC stays usable while the game builds.
@@ -29,6 +31,7 @@
 #   1. Extracts the disc from the ISO into game/ (with its sector map, .disc_layout) and prepares game/IOP_MOD.
 #   2. Builds the Rust tools (ps2_recomp, ps2-tools) and translates SCUS_973.99 to C++ with RustPortPS2/games/scus-97399/gow-port.toml.
 #   3. Builds the game (gow-2005). The launcher is a separate download (GitHub Releases).
+#      The native IOP modules are created before building from the disc's IRX files (games/scus-97399/iop.manifest).
 #   4. Optimization: the VU1 microcode is created before building from the ELF (games/scus-97399/vu1.manifest, without
 #      playing). If that was not possible, it runs the game for a few minutes with automatic key presses, saves the VU1 microcode and
 #      the IOP modules it uses and rebuilds with them as native code (much faster). Only the first time;
@@ -426,8 +429,10 @@ configure() {
         extra+=("-DPS2X_PGO=generate")
     elif [ "${PGO_MODE:-}" = "use" ]; then
         extra+=("-DPS2X_PGO=use" "-DPS2X_PGO_PROFILE=$PGO_PROFILE")
+    elif [ "${PGO_MODE:-}" = "shipped" ]; then
+        extra+=("-DPS2X_PGO=shipped")
     else
-        extra+=("-DPS2X_PGO=")
+        extra+=("-DPS2X_PGO=off")
     fi
     if compgen -G "$VU1/*.bin" >/dev/null; then
         extra+=("-DPS2X_VU1_MICROCODE_DIR=$VU1" "-DPS2X_VU1_GENERATOR_SOURCE=$NATIVE/tools/vu1/generate_vu1.cpp"
@@ -452,9 +457,12 @@ configure() {
         "${extra[@]}" >/dev/null
 }
 
-# GOW-Port: PGO (decision D3: trained on this PC, never shipped). The profile stays in the build folder, like the generated code.
+# GOW-Port: PGO. Two profiles: the full one trained on this PC from this game (the optional --pgo on; it stays in the build
+# folder, like the generated code, and wins when present) and the runtime-only one shipped in the repository (built from our
+# own runtime, holds nothing from the game; the default, so an installation never opens the game by itself).
 PGO_DIR="$BUILD/pgo"
 PGO_PROFILE="$PGO_DIR/gow.profdata"
+PGO_SHIPPED="$NATIVE/pgo/runtime.profdata"
 PGO_POSSIBLE=0
 [ "$COMPILER_CHECK" = "clang++" ] && [ "$PGO" != "off" ] && PGO_POSSIBLE=1
 HAS_PGO_PROFILE=0
@@ -463,27 +471,22 @@ TRAIN_PGO=0
 if [ "$PGO_POSSIBLE" = 1 ] && { { [ "$PGO" = "on" ] && [ "$HAS_PGO_PROFILE" = 0 ]; } || [ "$RETRAIN_PGO" = 1 ]; }; then
     TRAIN_PGO=1
 fi
-USE_PGO=0
-if [ "$PGO_POSSIBLE" = 1 ] && { [ "$TRAIN_PGO" = 1 ] || [ "$HAS_PGO_PROFILE" = 1 ]; }; then
-    USE_PGO=1
-fi
 if [ "$TRAIN_PGO" = 1 ]; then
     PGO_MODE="generate"
-elif [ "$USE_PGO" = 1 ]; then
+elif [ "$PGO_POSSIBLE" = 1 ] && [ "$HAS_PGO_PROFILE" = 1 ]; then
     PGO_MODE="use"
+elif [ "$PGO_POSSIBLE" = 1 ] && [ -f "$PGO_SHIPPED" ]; then
+    PGO_MODE="shipped"
 else
     PGO_MODE=""
 fi
 if [ "$COMPILER_CHECK" = "clang++" ]; then
-    if [ "$TRAIN_PGO" = 1 ]; then
-        echo "Speed profile (PGO): trained in the optimization run"
-    elif [ "$USE_PGO" = 1 ]; then
-        echo "Speed profile (PGO): the existing profile ($PGO_PROFILE)"
-    elif [ "$PGO" = "off" ]; then
-        echo "Speed profile (PGO): not trained yet (--pgo off)"
-    else
-        echo "Speed profile (PGO): not trained yet (pass --pgo on to train it)"
-    fi
+    case "$PGO_MODE" in
+        generate) echo "Speed profile (PGO): training the full profile in the optimization run" ;;
+        use) echo "Speed profile (PGO): the profile trained on this PC ($PGO_PROFILE)" ;;
+        shipped) echo "Speed profile (PGO): the runtime-only profile of the repository ($PGO_SHIPPED); --pgo on trains a full one" ;;
+        *) echo "Speed profile (PGO): none ($([ "$PGO" = "off" ] && echo "--pgo off" || echo "no profile in the repository"))" ;;
+    esac
 fi
 
 step "Configuring the build (the first time it downloads raylib, imgui and rlImGui)"
@@ -503,6 +506,19 @@ for f in "$GEN"/out/*.h; do copy_if_changed "$f" "$NATIVE/ps2xRuntime/include/$(
 # The overrides live in ps2xRuntime/src/game now (part of the CMake target); drop the copies older versions left here.
 rm -f "$RUNNER/gow_overrides.cpp" "$RUNNER/gow_pad2_packet.h" "$RUNNER/gow_gs_replay.h"
 echo "$(ls "$GEN"/out/*.cpp | wc -l) C++ files in RustPortPS2/native/ps2xRuntime/src/runner."
+
+# GOW-Port: the native IOP code needs no game session either. The text of an IRX at its load base is a function of the IRX file
+# alone, so the manifest (games/scus-97399/iop.manifest: file, base, size and hash per module, no code) rebuilds the dump the game
+# writes with PS2X_IOP_DUMP_MODULES from the disc's own IRX files, and iop-gen compiles it before the build.
+IOP_MANIFEST="$PROFILE/iop.manifest"
+if [ -f "$IOP_MANIFEST" ]; then
+    step "IOP modules from the disc (without playing)"
+    if "$TOOLS" iop-manifest apply "$GAME" "$IOP_MANIFEST" "$GEN/iop_disc"; then
+        "$TOOLS" iop-gen "$GEN/iop_disc" "$NATIVE/ps2xIOP/src/native"
+    else
+        warn "Could not rebuild the IOP modules from this disc; the IOP code will be captured by the optimization run, or interpreted."
+    fi
+fi
 
 # --- 3. Game ------------------------------------------------------------------------------------------
 build_game() {
@@ -545,8 +561,8 @@ if [ "$TRAIN_PGO" = 1 ]; then
         rm -f "$PGO_DIR"/*.profraw
         PGO_MODE="use"
     else
-        warn "The optimization run wrote no speed profile (did the game close early?): the game is built without PGO this time."
-        PGO_MODE=""
+        warn "The optimization run wrote no speed profile (did the game close early?): the game is built with the profile of the repository instead."
+        if [ -f "$PGO_SHIPPED" ]; then PGO_MODE="shipped"; else PGO_MODE=""; fi
     fi
     configure
     build_game

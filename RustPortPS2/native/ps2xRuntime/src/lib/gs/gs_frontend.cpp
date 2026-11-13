@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -90,6 +91,105 @@ namespace
         return forced >= 0 ? static_cast<uint64_t>(forced) : value;
     }
 
+    // GOW-Port: copies every field of a GSContext without touching its padding bytes (see buildDrawBatch). The asserts fail
+    // when a field is added to one of these structs, as a reminder to copy it here too.
+    static_assert(sizeof(GSContext) == 112 && sizeof(GSFrameReg) == 16 && sizeof(GSScissorReg) == 8 &&
+                      sizeof(GSTex0Reg) == 20 && sizeof(GSXYOffsetReg) == 4 && sizeof(GSZbufReg) == 8,
+                  "GSContext changed: update copyContextFields");
+    inline void copyContextFields(GSContext &dst, const GSContext &src)
+    {
+        dst.frame.fbp = src.frame.fbp;
+        dst.frame.fbw = src.frame.fbw;
+        dst.frame.psm = src.frame.psm;
+        dst.frame.fbmsk = src.frame.fbmsk;
+        dst.scissor.x0 = src.scissor.x0;
+        dst.scissor.x1 = src.scissor.x1;
+        dst.scissor.y0 = src.scissor.y0;
+        dst.scissor.y1 = src.scissor.y1;
+        dst.tex0.tbp0 = src.tex0.tbp0;
+        dst.tex0.tbw = src.tex0.tbw;
+        dst.tex0.psm = src.tex0.psm;
+        dst.tex0.tw = src.tex0.tw;
+        dst.tex0.th = src.tex0.th;
+        dst.tex0.tcc = src.tex0.tcc;
+        dst.tex0.tfx = src.tex0.tfx;
+        dst.tex0.cbp = src.tex0.cbp;
+        dst.tex0.cpsm = src.tex0.cpsm;
+        dst.tex0.csm = src.tex0.csm;
+        dst.tex0.csa = src.tex0.csa;
+        dst.tex0.cld = src.tex0.cld;
+        dst.xyoffset.ofx = src.xyoffset.ofx;
+        dst.xyoffset.ofy = src.xyoffset.ofy;
+        dst.zbuf.zbp = src.zbuf.zbp;
+        dst.zbuf.psm = src.zbuf.psm;
+        dst.zbuf.zmask = src.zbuf.zmask;
+        dst.tex1 = src.tex1;
+        dst.miptbp1 = src.miptbp1;
+        dst.miptbp2 = src.miptbp2;
+        dst.clamp = src.clamp;
+        dst.alpha = src.alpha;
+        dst.test = src.test;
+        dst.fba = src.fba;
+    }
+
+    // GOW-Port: PS2X_GS_TRACE_TBP output, out of line so the iostream code does not weigh on GS::vertexKick.
+    __attribute__((noinline, cold)) void traceVertex(GSPrimType type, bool drawing, int count, const GSVertex &v)
+    {
+        std::cerr << "[gs:trace] prim=" << static_cast<unsigned>(type) << " draw=" << drawing
+                  << " cnt=" << count << " xy=(" << v.x << "," << v.y << ") stq=(" << v.s << "," << v.t
+                  << "," << v.q << ") uv=(" << (v.u >> 4) << "," << (v.v >> 4) << ") a=" << static_cast<unsigned>(v.a) << " r=" << static_cast<unsigned>(v.r) << std::endl;
+    }
+
+    // GOW-Port: effect switches for weak GPUs (the launcher's Graphics > Effects, GOW_FX_*=0 turns one off). Each one is a
+    // mask on the primitives the effect is drawn with, applied on the host side of the GS: the guest runs the same and only
+    // the picture changes. They are read once.
+    //  GOW_FX_SHADOWS=0   character shadow volumes: untextured, COLCLAMP off, ALPHA = Cs*FIX + Cd (0x68)
+    //  GOW_FX_ADDITIVE=0  additive effects in the 3D scene (fire, glows, particles): ALPHA = Cs*Cs + Cd with the Z test on;
+    //                     the HUD and screen flashes keep the Z test off and stay
+    //  GOW_FX_FILTER=0    nearest texture sampling instead of the game's bilinear
+    bool gowFxEnabled(const char *name)
+    {
+        const char *v = std::getenv(name);
+        return !(v && v[0] == '0');
+    }
+    bool gowFxShadows() { static const bool on = gowFxEnabled("GOW_FX_SHADOWS"); return on; }
+    bool gowFxAdditive() { static const bool on = gowFxEnabled("GOW_FX_ADDITIVE"); return on; }
+    bool gowFxFilter() { static const bool on = gowFxEnabled("GOW_FX_FILTER"); return on; }
+
+    // The game's present copy: a textured, blended sprite over the whole 640x448 screen reading another buffer. Never masked.
+    bool gowFxIsScreenCopy(const GSPrimitiveBatch &batch)
+    {
+        const GSDrawState &state = batch.state;
+        if (state.prim.type != GS_PRIM_SPRITE || batch.vertexCount < 2u || !state.prim.tme)
+            return false;
+        const GSContext &ctx = state.context;
+        const int ofx = static_cast<int>(ctx.xyoffset.ofx >> 4), ofy = static_cast<int>(ctx.xyoffset.ofy >> 4);
+        int x0 = static_cast<int>(batch.vertices[0].x) - ofx, y0 = static_cast<int>(batch.vertices[0].y) - ofy;
+        int x1 = static_cast<int>(batch.vertices[1].x) - ofx, y1 = static_cast<int>(batch.vertices[1].y) - ofy;
+        if (x0 > x1)
+            std::swap(x0, x1);
+        if (y0 > y1)
+            std::swap(y0, y1);
+        return ctx.frame.fbp != ctx.tex0.tbp0 && x0 <= 0 && y0 <= 0 && x1 >= 639 && y1 >= 447;
+    }
+
+    // 0 = draw it, 1 = a shadow switched off, 2 = an additive effect switched off
+    int gowFxMasked(const GSPrimitiveBatch &batch)
+    {
+        const GSDrawState &state = batch.state;
+        if (!state.prim.abe)
+            return 0;
+        const uint32_t alpha = static_cast<uint32_t>(state.context.alpha & 0xFFu);
+        if (!state.prim.tme && (state.colclamp & 1u) == 0u && alpha == 0x68u)
+            return gowFxShadows() || gowFxIsScreenCopy(batch) ? 0 : 1;
+        if (((state.context.test >> 16u) & 1u) == 0u) // Z test off: screen-space drawing
+            return 0;
+        const uint32_t a = alpha & 3u, b = (alpha >> 2) & 3u, d = (alpha >> 6) & 3u;
+        if (a == 0u && b == 2u && d == 1u)
+            return gowFxAdditive() || gowFxIsScreenCopy(batch) ? 0 : 2;
+        return 0;
+    }
+
     bool gowFogOff()
     {
         static const bool off = []
@@ -111,11 +211,10 @@ namespace
         double zMax = -1e300;
     };
 
-    void gowFogDiagDraw(const GSPrimitiveBatch &batch)
+    // GOW-Port: the body is kept out of line (it was inlined into GS::vertexKick, giving that function a 1.2 KB frame and
+    // a prologue that saves every callee-saved register on each vertex, diagnostics or not).
+    __attribute__((noinline)) void gowFogDiagDrawSlow(const GSPrimitiveBatch &batch, long startSeconds)
     {
-        const long startSeconds = gowFogDiagStart();
-        if (startSeconds < 0)
-            return;
         using Clock = std::chrono::steady_clock;
         static const Clock::time_point first = Clock::now();
         static std::map<std::string, GowFogDiagAgg> aggs;
@@ -199,6 +298,13 @@ namespace
             a.zMin = std::min(a.zMin, v[i].z);
             a.zMax = std::max(a.zMax, v[i].z);
         }
+    }
+
+    inline void gowFogDiagDraw(const GSPrimitiveBatch &batch)
+    {
+        const long startSeconds = gowFogDiagStart();
+        if (startSeconds >= 0)
+            gowFogDiagDrawSlow(batch, startSeconds);
     }
 
     // GOW-Port: both CPU/GPU paths return 640-wide rows; the captures are compact.
@@ -341,8 +447,9 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 
 void GS::reset()
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     std::memset(m_ctx, 0, sizeof(m_ctx));
+    m_drawStateDirty = true; // GOW-Port
     m_gifInput = {}; // GOW-Port: reset also discards incomplete tags/registers.
     m_prim = {};
     m_primRegister = {};
@@ -450,7 +557,7 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
 
 GSDebugSnapshot GS::getDebugSnapshot() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
 
     GSDebugSnapshot snapshot{};
     snapshot.ctx[0] = m_ctx[0];
@@ -490,7 +597,7 @@ GSDebugSnapshot GS::getDebugSnapshot() const
 
 std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
 
     std::vector<GSDebugHistoryEntry> out;
     out.reserve(m_debugHistoryCount);
@@ -504,7 +611,7 @@ std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 
 void GS::clearDebugHistory()
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
     m_debugNextSeq = 1;
@@ -514,13 +621,13 @@ void GS::clearDebugHistory()
 
 bool GS::isDebugHistoryPaused() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_debugHistoryPaused;
 }
 
 void GS::setDebugHistoryPaused(bool paused)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     m_debugHistoryPaused = paused;
 }
 
@@ -702,7 +809,7 @@ void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp
 
 bool GS::getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (!m_hasPreferredDisplaySource)
     {
         outSource = {};
@@ -755,7 +862,7 @@ void GS::latchHostPresentationFrame()
 {
     GSPresentationRequest request{};
     {
-        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        std::lock_guard<GSStateMutex> lock(m_stateMutex);
         if (!m_backend || !m_privRegs)
         {
             std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
@@ -818,7 +925,7 @@ void GS::latchHostPresentationFrame()
 
     if (hasFrame)
     {
-        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        std::lock_guard<GSStateMutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred, request.vsyncTick);
     }
 }
@@ -845,7 +952,7 @@ void GS::recordAcquiredSharedFrame(const GSSharedPresent::Frame &frame)
     }
     if (changed && !frame.blank)
     {
-        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        std::lock_guard<GSStateMutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(frame.displayFbp, frame.sourceFbp,
                                         frame.width, frame.height, frame.usedPreferred, frame.vsyncTick);
     }
@@ -910,7 +1017,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 // GOW-Port: the native shortcuts are only valid at the start of a tag of this PATH.
 bool GS::hasPendingGIFPacket(GifPathId path) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     const size_t index = static_cast<size_t>(path);
     return index == 0u || index >= m_gifInput.size() || m_gifInput[index].pending();
 }
@@ -945,8 +1052,12 @@ void GS::stageMarker(const uint8_t *data, uint32_t sizeBytes)
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId path)
 {
-    ps2_perf::Scope perf(ps2_perf::Bucket::Gs); // GOW-Port: includes rasterization and GIF transfers.
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    // GOW-Port: includes rasterization and GIF transfers. The stage thread already runs inside a Gs scope for its whole
+    // batch (gs_stage.cpp): a nested scope of the same bucket accounts exactly the same, but cost two clock reads per packet.
+    std::optional<ps2_perf::Scope> perf;
+    if (ps2_perf::enabled() && ps2_perf::accounting.active != ps2_perf::Bucket::Gs)
+        perf.emplace(ps2_perf::Bucket::Gs);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (path == static_cast<GifPathId>(0))
     {
         stageMarker(data, sizeBytes); // GOW-Port: an early FINISH marker, not GIF data
@@ -1047,6 +1158,27 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId pat
             // GOW-Port: IMAGE2 also consumes its payload, without applying PRE.
             else if (input.format == GIF_FMT_IMAGE || input.format == GIF_FMT_IMAGE2)
                 input.imageBytes = nloop * 16u;
+
+            // GOW-Port: a PACKED tag whose whole payload is in this packet (nearly all of them: one XGKICK is one packet)
+            // runs its registers in a tight loop instead of going through the per-quadword cursor above for each one. It
+            // leaves the cursor as the loop above would after the last register: nothing left, register index 0.
+            if (input.format == GIF_FMT_PACKED && input.registersLeft &&
+                static_cast<uint64_t>(input.registersLeft) * 16u <= sizeBytes - offset)
+            {
+                const uint32_t nreg = input.nreg;
+                const uint8_t *payload = data + offset;
+                for (uint32_t loop = 0u; loop < nloop; ++loop)
+                {
+                    for (uint32_t r = 0u; r < nreg; ++r)
+                    {
+                        writeRegisterPacked(input.regs[r], loadLE64(payload), loadLE64(payload + 8u));
+                        payload += 16u;
+                    }
+                }
+                offset += input.registersLeft * 16u;
+                input.registersLeft = 0u;
+                input.regIndex = 0u;
+            }
         }
         else if (input.imageBytes)
         {
@@ -1067,7 +1199,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId pat
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes, GifPathId path)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16u || !m_backend || hasPendingGIFPacket(path))
         return false;
 
@@ -1117,7 +1249,7 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            uint32_t sizeBytes,
                            uint64_t setupGifTag)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     // GOW-Port: DMA validates the whole chain before applying PRE/Q, under the same lock as the upload.
     if (data && sizeBytes && m_backend && (setupGifTag & 0x7FFFu) &&
         ((setupGifTag >> 58u) & 3u) == GIF_FMT_PACKED)
@@ -1415,12 +1547,20 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     writeRegisterUnlocked(regAddr, value);
 }
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 {
+    // GOW-Port: every register except the vertex ones (RGBAQ, ST, UV, XYZF2, XYZ2, FOG, XYZF3, XYZ3) may change the draw state.
+    {
+        constexpr uint64_t kVertexRegs = (1ull << GS_REG_RGBAQ) | (1ull << GS_REG_ST) | (1ull << GS_REG_UV) |
+                                         (1ull << GS_REG_XYZF2) | (1ull << GS_REG_XYZ2) | (1ull << GS_REG_FOG) |
+                                         (1ull << GS_REG_XYZF3) | (1ull << GS_REG_XYZ3);
+        if (regAddr >= 64u || ((kVertexRegs >> regAddr) & 1ull) == 0ull)
+            m_drawStateDirty = true;
+    }
     const bool interestingReg =
         regAddr == GS_REG_PRIM ||
         regAddr == GS_REG_RGBAQ ||
@@ -1892,30 +2032,33 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
 void GS::vertexKick(bool drawing)
 {
     // GOW-Port: PS2X_GS_TRACE_TBP=<tbp0> logs the vertices that arrive with that texture active (-2: untextured fans, -3: textured fans).
+    // PS2X_GS_TRACE_AFTER=<seconds>: start the trace after those seconds from the first vertex.
+    // The settings are read once into one static (one guard check per vertex, not one per setting) and the trace
+    // conditions are only evaluated when PS2X_GS_TRACE_TBP is set at all.
+    struct TraceConfig
     {
-        static const long traceTbp = []
-        {
-            const char *v = std::getenv("PS2X_GS_TRACE_TBP");
-            return v ? std::strtol(v, nullptr, 10) : -1L;
-        }();
+        bool enabled;
+        long tbp;
+        long after;
+        std::chrono::steady_clock::time_point start;
+    };
+    static const TraceConfig trace = []
+    {
+        const char *tbp = std::getenv("PS2X_GS_TRACE_TBP");
+        const char *after = std::getenv("PS2X_GS_TRACE_AFTER");
+        return TraceConfig{tbp != nullptr, tbp ? std::strtol(tbp, nullptr, 10) : -1L, after ? std::strtol(after, nullptr, 10) : 0L,
+                           std::chrono::steady_clock::now()};
+    }();
+    if (trace.enabled)
+    {
         static int traced = 0;
-        // PS2X_GS_TRACE_AFTER=<seconds>: start the trace after those seconds from the first vertex.
-        static const long traceAfter = []
-        {
-            const char *v = std::getenv("PS2X_GS_TRACE_AFTER");
-            return v ? std::strtol(v, nullptr, 10) : 0L;
-        }();
-        static const auto traceStart = std::chrono::steady_clock::now();
         const GSContext &tc = m_ctx[m_prim.ctxt ? 1 : 0];
-        if (((traceTbp >= 0 && m_prim.tme && static_cast<long>(tc.tex0.tbp0) == traceTbp) ||
-             (traceTbp == -2 && !m_prim.tme && m_prim.type == GS_PRIM_TRIFAN) || (traceTbp == -3 && m_prim.tme && m_prim.type == GS_PRIM_TRIFAN)) && traced < 400 &&
-            std::chrono::steady_clock::now() - traceStart >= std::chrono::seconds(traceAfter))
+        if (((trace.tbp >= 0 && m_prim.tme && static_cast<long>(tc.tex0.tbp0) == trace.tbp) ||
+             (trace.tbp == -2 && !m_prim.tme && m_prim.type == GS_PRIM_TRIFAN) || (trace.tbp == -3 && m_prim.tme && m_prim.type == GS_PRIM_TRIFAN)) && traced < 400 &&
+            std::chrono::steady_clock::now() - trace.start >= std::chrono::seconds(trace.after))
         {
             ++traced;
-            const GSVertex &v = m_vtxQueue[m_vtxCount % kMaxVerts];
-            std::cerr << "[gs:trace] prim=" << static_cast<unsigned>(m_prim.type) << " draw=" << drawing
-                      << " cnt=" << m_vtxCount << " xy=(" << v.x << "," << v.y << ") stq=(" << v.s << "," << v.t
-                      << "," << v.q << ") uv=(" << (v.u >> 4) << "," << (v.v >> 4) << ") a=" << static_cast<unsigned>(v.a) << " r=" << static_cast<unsigned>(v.r) << std::endl;
+            traceVertex(m_prim.type, drawing, m_vtxCount, m_vtxQueue[m_vtxCount % kMaxVerts]);
         }
     }
     ++m_vtxCount;
@@ -1966,10 +2109,21 @@ void GS::vertexKick(bool drawing)
 
     if (drawing && m_backend)
     {
-        GSPrimitiveBatch batch = buildDrawBatch(needed);
+        const bool sameState = fillDrawBatch(needed);
+        const GSPrimitiveBatch &batch = m_batch;
         updatePreferredDisplaySourceForDraw(batch);
         gowFogDiagDraw(batch); // GOW-Port: PS2X_GS_FOG_DIAG.
-        m_backend->Submit(batch);
+        static const bool fxMasks = !gowFxShadows() || !gowFxAdditive();
+        if (fxMasks && gowFxMasked(batch) != 0)
+        {
+            // GOW-Port: a masked primitive is never submitted; the next one rebuilds its state instead of assuming it matches
+            // the last submitted draw
+            m_drawStateDirty = true;
+        }
+        else if (sameState)
+            m_backend->SubmitSameState(batch);
+        else
+            m_backend->Submit(batch);
         recordDrawDebugEventUnlocked(needed);
     }
 
@@ -2009,19 +2163,19 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
 }
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
 }
 
@@ -2030,7 +2184,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
     if (!backend)
         backend = std::make_unique<GSNullBackend>();
 
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
     if (m_backend)
     {
@@ -2071,24 +2225,32 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 
 uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     return m_backend ? m_backend->ReadVram(psm, base, bw, x, y) : 0u;
 }
 
 void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<GSStateMutex> lock(m_stateMutex);
     if (m_backend)
         m_backend->WriteVram(psm, base, bw, x, y, value);
 }
 
-GSPrimitiveBatch GS::buildDrawBatch(int vertexCount) const
+bool GS::fillDrawBatch(int vertexCount)
 {
-    GSPrimitiveBatch batch{};
+    GSPrimitiveBatch &batch = m_batch;
     batch.vertexCount = static_cast<uint8_t>(std::min(vertexCount, 3));
     for (int i = 0; i < batch.vertexCount; ++i)
         batch.vertices[static_cast<size_t>(i)] = m_vtxQueue[i];
-    batch.state.context = m_ctx[m_prim.ctxt ? 1 : 0];
+    // GOW-Port: no register that is part of the draw state was written since the last build: the state bytes are the same.
+    if (!m_drawStateDirty)
+        return true;
+    m_drawStateDirty = false;
+    // GOW-Port: the draw state is built from zeroed bytes and filled field by field (never by copying a padded struct), so
+    // its padding is always zero. GSThreadedBackend::Enqueue then decides "same state as the previous draw" with one memcmp
+    // instead of the out-of-line field-by-field operator== (3 % of the stage thread); the fields are the same.
+    std::memset(&batch.state, 0, sizeof(batch.state));
+    copyContextFields(batch.state.context, m_ctx[m_prim.ctxt ? 1 : 0]);
     batch.state.prim = m_prim;
     if (gowFogOff())
         batch.state.prim.fge = false; // GOW-Port: PS2X_GS_FOG_OFF.
@@ -2108,7 +2270,9 @@ GSPrimitiveBatch GS::buildDrawBatch(int vertexCount) const
     const uint8_t mmag = static_cast<uint8_t>((tex1 >> 5u) & 0x1u);
     const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6u) & 0x7u);
     batch.state.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
-    return batch;
+    if (!gowFxFilter() && !gowFxIsScreenCopy(batch))
+        batch.state.linearFilter = false; // GOW-Port: GOW_FX_FILTER=0
+    return false;
 }
 
 void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)

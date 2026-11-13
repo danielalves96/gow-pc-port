@@ -26,12 +26,43 @@ install.cmd -Iso "D:\God of War.iso" -FastDev        # RelWithDebInfo, logs on, 
 
 ```bash
 ./install.sh "/path/God of War.iso"
-./install.sh --compiler clang --pgo on               # Clang build with PGO training + optimization pass
+./install.sh --compiler clang --pgo on               # Clang build with the full PGO training + optimization pass (optional)
 ./install.sh --optimize 300                          # repeat the capture pass for 300 s
 ```
 
 They run, in order: extract the ISO → apply the VU1 manifest → `ps2_recomp` → configure CMake → build → optionally
 capture and rebuild. Each step is skipped if it is already done, so re-running is cheap.
+
+## The shipped speed profile
+
+Clang builds use PGO. `RustPortPS2/native/pgo/runtime.profdata` (about 4 MB, `*.profdata` is binary in `.gitattributes`) is the
+profile every clang build uses by default (`PS2X_PGO=auto` in `CMakeLists.txt`: GCC and MSVC ignore it; the installers pass
+`shipped`, `use`, `generate` or `off` explicitly). It was made from a full profile trained on the opening scene, keeping only
+this repository's own runtime and dropping everything derived from the game, so it can live in the repository and the
+installation never needs the game to open by itself. A full profile trained on the player's PC (`install.ps1 -Pgo on`, the
+launcher's Optimize now: `build/pgo/gow.profdata`) wins over it when present.
+
+Measured (final build, launcher environment, 60 FPS, opening scene): the full profile trained on the PC gives, on 4 cores,
+VU1 -23 %, EE -20 %, GS -36 % per frame; the shipped runtime-only one gives GS -24 % (VU1 about -2 %, EE about 0), see
+`TOASTER_PLAN.md` item 6.
+
+**Refreshing it** (after runtime changes, before a release; a function that changed since the profile was made, or that it
+never saw, is just compiled without profile data, and the `-Wno-profile-instr-*` flags keep the build quiet, so a stale
+profile only loses part of its gain):
+
+1. Build and train a full profile with the final configuration: `install.cmd -Pgo on -RetrainPgo` (it opens the game by
+   itself for 4 minutes: do it on a PC you are not using).
+2. `scripts/make-runtime-profile.ps1` (defaults: `RustPortPS2/native/build/pgo/gow.profdata` in, `RustPortPS2/native/pgo/runtime.profdata`
+   out). It runs `llvm-profdata merge --no-function='sub_[0-9A-F]{8}|entry_[0-9A-Fa-f]+|vu1n_part|vu1c_gen|IL[jmiy][0-9]{3,}E'`
+   (the recompiled EE functions, the generated VU1 blocks and compiled programs, and templates instantiated with microcode words),
+   then audits the result: it lists the function names with `llvm-profdata show --all-functions` and fails if one is generated
+   code, and fails if any function has indirect call sites in `show --ic-targets` (value-profile data could hold hashes of
+   generated functions; to drop it, `merge --text`, zero the indirect-call sections and merge the text back with `-o`).
+3. Commit the file and say in the message which commit the runtime sources were at and what the audit showed.
+
+On Linux the same two commands work by hand: `llvm-profdata merge --no-function='<the regex above>' -o
+RustPortPS2/native/pgo/runtime.profdata build/pgo/gow.profdata`, then `llvm-profdata show --all-functions` and
+`show --ic-targets --all-functions` to check the names and the indirect call sites. Never commit the full profile.
 
 ## Manual build of the runtime
 
@@ -43,6 +74,11 @@ cargo build --release -p ps2-tools --manifest-path RustPortPS2/Cargo.toml
 RustPortPS2/target/release/ps2-tools vu1-manifest apply game/SCUS_973.99 \
   RustPortPS2/games/scus-97399/vu1.manifest vu1_captures
 cp RustPortPS2/games/scus-97399/vu1-heads.list "$(dirname vu1_captures)/vu1n_heads.txt"
+
+# 1b. Native IOP modules from the disc's IRX files (iop.manifest: file, load base, text size and hash; no code).
+#     This writes what PS2X_IOP_DUMP_MODULES would, and iop-gen turns it into ps2xIOP/src/native/iopn_*.cpp.
+RustPortPS2/target/release/ps2-tools iop-manifest apply game RustPortPS2/games/scus-97399/iop.manifest build-gen/iop_disc
+RustPortPS2/target/release/ps2-tools iop-gen build-gen/iop_disc RustPortPS2/native/ps2xIOP/src/native
 
 # 2. Recompile the game
 cargo build --release -p ps2-recomp-cli --manifest-path RustPortPS2/Cargo.toml
@@ -91,6 +127,7 @@ files** (`src/runner/*.cpp`, `src/native/iopn_*`, `build/*/vu1*_generated`): the
 | `PS2X_FAST_MATH_AVX2` | `OFF` | MSVC `/fp:fast /arch:AVX2`, not validated with the game; the released build does **not** require AVX2 |
 | `PS2X_VU1_AVX2` | `OFF` | Same idea for the VU1 microcode |
 | `PS2X_SHOW_WINDOWS_CONSOLE` | `ON` | Console window on Windows; the installers pass `OFF` |
+| `PS2X_PGO`, `PS2X_PGO_PROFILE` | `auto` | Clang only: `auto`/`shipped` = the profile in `native/pgo/`, `use` = the one in `PS2X_PGO_PROFILE`, `generate` = instrumented training build, `off` = none (see the next section) |
 | `PS2X_LTO_JOBS` | empty | GCC/Clang LTO link processes; the Linux installer limits it by RAM |
 
 To check that VU1 took the fast path, look for this in the Ninja log: `[generate_vu1] ... images` with a number greater than

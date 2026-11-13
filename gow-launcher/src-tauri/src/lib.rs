@@ -1,8 +1,9 @@
 //! Tauri shell of the launcher: commands and events over `gow-core`. No launcher logic lives here.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use gow_core::controller::{self, PadDeviceList};
@@ -18,11 +19,11 @@ use gow_core::iso_patch::{self, PatchError, PatchOutcome};
 use gow_core::launch::LaunchError;
 use gow_core::optimizer::{self, Optimizer, OptimizerSnapshot};
 use gow_core::paths::AppPaths;
-use gow_core::process::{self, GameSession, StartOptions};
+use gow_core::process::{self, GameFinished, GameSession, StartOptions};
 use gow_core::report::{self, session, HostFacts, ReportRequest};
 use gow_core::settings::{DisplayInfo, Settings};
 use gow_core::update::Activity;
-use gow_core::{display, kit, legacy, rebuild, shortcut, textures};
+use gow_core::{direct, display, kit, legacy, rebuild, shortcut, textures};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
@@ -44,6 +45,25 @@ struct AppState {
     /// GOW-Port (0.3.1): the CHD being converted to ISO from the wizard, set to stop it.
     chd_cancel: Mutex<Option<Arc<AtomicBool>>>,
     updater: updater::Updates,
+    /// GOW-Port (issue #40): the launcher was started to open the game directly and has no window (yet).
+    windowless: AtomicBool,
+    /// The running game was started directly: closing a window opened meanwhile does not end the launcher before the game,
+    /// so the session is still counted and Steam still sees the game running.
+    started_directly: AtomicBool,
+    /// A direct start was tried (the window must not press PLAY again for `--play`).
+    direct_attempted: AtomicBool,
+    /// Why a direct start ended in the window, for the interface to show once.
+    notice: Mutex<Option<StartNotice>>,
+}
+
+/// What the window shows when it opens because a direct start did not go as planned.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartNotice {
+    /// The game started and closed with an error.
+    finished: Option<GameFinished>,
+    /// The game could not start.
+    launch_error: Option<CommandError>,
 }
 
 impl AppState {
@@ -53,6 +73,14 @@ impl AppState {
         change(&mut settings);
         let _ = settings.save(&self.paths.settings_file());
         settings.clone()
+    }
+
+    /// Like `update`, but the file is written (and the UI told by the caller) only when `change` says it changed something.
+    fn update_if(&self, change: impl FnOnce(&mut Settings) -> bool) {
+        let mut settings = self.settings.lock().unwrap();
+        if change(&mut settings) {
+            let _ = settings.save(&self.paths.settings_file());
+        }
     }
 
     fn snapshot(&self) -> Settings {
@@ -97,6 +125,8 @@ struct Bootstrap {
     graphics_cards: Vec<GraphicsCard>,
     data_directory: String,
     arguments: LaunchArguments,
+    launcher_path: String,
+    notice: Option<StartNotice>,
 }
 
 /// First call of the interface: migrates the settings (needs the system language and the display) and returns
@@ -114,9 +144,13 @@ fn bootstrap(window: WebviewWindow, state: State<'_, AppState>, locale: String) 
         graphics_cards: gpu::graphics_cards(),
         data_directory: state.paths.data_dir().to_string_lossy().into_owned(),
         arguments: LaunchArguments {
-            play: arguments.iter().any(|a| a == "--play"),
-            wizard: arguments.iter().any(|a| a == "--wizard"),
+            // A direct start already tried: the window opened because it could not happen, not to press PLAY again.
+            play: !state.direct_attempted.load(Ordering::SeqCst)
+                && arguments.iter().skip(1).any(|a| a.eq_ignore_ascii_case(direct::PLAY_ARGUMENT)),
+            wizard: arguments.iter().skip(1).any(|a| a.eq_ignore_ascii_case(direct::WIZARD_ARGUMENT)),
         },
+        launcher_path: std::env::current_exe().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default(),
+        notice: state.notice.lock().unwrap().take(),
     }
 }
 
@@ -177,7 +211,7 @@ struct GameStatus {
     ready: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn game_status(state: State<'_, AppState>) -> GameStatus {
     let settings = state.snapshot();
     let game = game::check_game(&settings.elf, &settings.executable);
@@ -188,7 +222,7 @@ fn game_status(state: State<'_, AppState>) -> GameStatus {
 }
 
 /// Looks for the ELF and the runner. Without `force`, only the empty fields are filled.
-#[tauri::command]
+#[tauri::command(async)]
 fn detect_paths(state: State<'_, AppState>, force: bool) -> Settings {
     let found: DetectedPaths = game::detected_paths(&launcher_dir(), &gow_core::paths::default_destination());
     state.update(|settings| {
@@ -201,19 +235,94 @@ fn detect_paths(state: State<'_, AppState>, force: bool) -> Settings {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn detected_iso() -> String {
     game::detected_paths(&launcher_dir(), &gow_core::paths::default_destination()).iso
 }
 
 #[tauri::command]
-fn memory_card_directory(elf: String) -> String {
-    game::memory_card_directory(&elf)
+fn memory_card_file(elf: String) -> String {
+    game::memory_card_file(&elf)
+}
+
+// ---------------------------------------------------------------------------------------------- saves
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The saves the memory card holds, in the order the game lists them.
+#[tauri::command(async)]
+fn card_slots(elf: String) -> Vec<gow_core::saves::CardSlot> {
+    let card = game::memory_card_file(&elf);
+    if card.is_empty() {
+        Vec::new()
+    } else {
+        gow_core::saves::read_card_file_slots(std::path::Path::new(&card))
+    }
+}
+
+/// The dated copies of the card the game made at its altars (newest first).
+#[tauri::command(async)]
+fn save_backups(elf: String) -> Vec<gow_core::saves::SaveBackup> {
+    let card = game::memory_card_file(&elf);
+    if card.is_empty() {
+        Vec::new()
+    } else {
+        gow_core::saves::list_backups(std::path::Path::new(&card))
+    }
+}
+
+/// The saves inside one of those copies.
+#[tauri::command(async)]
+fn save_backup_slots(elf: String, id: String) -> Vec<gow_core::saves::CardSlot> {
+    let card = game::memory_card_file(&elf);
+    if card.is_empty() {
+        Vec::new()
+    } else {
+        gow_core::saves::backup_slots(std::path::Path::new(&card), &id)
+    }
+}
+
+/// A copy of the card now (a manual one).
+#[tauri::command(async)]
+fn backup_card_now(elf: String) -> Result<gow_core::saves::SaveBackup, String> {
+    let card = game::memory_card_file(&elf);
+    gow_core::saves::make_backup(std::path::Path::new(&card), "manual", unix_now()).map_err(|error| error.to_string())
+}
+
+/// Puts a copy in place of the card. Refused while the game runs; the card it replaces is kept in the history first.
+#[tauri::command(async)]
+fn restore_save_backup(elf: String, id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let card = game::memory_card_file(&elf);
+    let running = state.game.lock().unwrap().is_some();
+    gow_core::saves::restore_backup(std::path::Path::new(&card), &id, running, unix_now())
+        .map_err(|error| error.to_string())
+}
+
+/// The names of the save points and difficulties and the thumbnails of `points`, read from the player's installed disc
+/// (empty without it). Off the main thread: it reads about 4 MB.
+#[tauri::command]
+async fn save_art(state: State<'_, AppState>, points: Vec<u16>) -> Result<gow_core::save_art::SaveArt, String> {
+    let settings = state.snapshot();
+    let (elf, iso) = (settings.elf.clone(), settings.iso.clone());
+    tauri::async_runtime::spawn_blocking(move || gow_core::save_art::read_save_art(&elf, &iso, &points))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Asks the game for one slot of the card. While it runs it goes there from wherever it is; otherwise the request waits
+/// for the next start (the page then starts the game). Returns whether the game is running.
+#[tauri::command(async)]
+fn load_save_slot(elf: String, index: usize, state: State<'_, AppState>) -> Result<bool, String> {
+    let card = game::memory_card_file(&elf);
+    gow_core::saves::request_load(std::path::Path::new(&card), index, unix_now()).map_err(|error| error.to_string())?;
+    Ok(state.game.lock().unwrap().is_some())
 }
 
 // ---------------------------------------------------------------------------------------------- playing
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandError {
     key: String,
@@ -227,7 +336,13 @@ impl From<LaunchError> for CommandError {
 }
 
 #[tauri::command]
-fn start_game(app: AppHandle, window: WebviewWindow, state: State<'_, AppState>) -> Result<(), CommandError> {
+fn start_game(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
+    launch_game(&app, &state)
+}
+
+/// Opens the game: the PLAY button and a direct start (issue #40) go through here, so both build the same environment,
+/// track the session and count the play time.
+fn launch_game(app: &AppHandle, state: &AppState) -> Result<(), CommandError> {
     if state.game.lock().unwrap().is_some() {
         return Ok(());
     }
@@ -237,6 +352,9 @@ fn start_game(app: AppHandle, window: WebviewWindow, state: State<'_, AppState>)
     }
     // If a rebuild finished since last time, the active copy of the executable is updated before opening.
     state.optimizer.prepare_to_play();
+    // What the player changed inside the game last time and the launcher did not get to read (it was closed meanwhile).
+    let ingame_state = state.paths.ingame_state_file();
+    state.update_if(|s| gow_core::ingame::consume(s, &ingame_state));
     let settings = state.snapshot();
     // GOW-Port: the instrumented training build of an interrupted "Optimize now" is several times slower than the game: it is
     // never opened (the interface explains it and the optimizer rebuilds the game by itself).
@@ -253,11 +371,27 @@ fn start_game(app: AppHandle, window: WebviewWindow, state: State<'_, AppState>)
         let state = finished_app.state::<AppState>();
         *state.game.lock().unwrap() = None;
         session::session_ended(&state.paths, started_at, &finished, report::unix_now());
+        let ingame_state = state.paths.ingame_state_file();
         let updated = state.update(|s| {
             s.seconds_played += finished.seconds;
             s.last_session = finished.seconds;
+            // the cheats, overlay lines and image adjustments the player set inside the game start the next session
+            gow_core::ingame::consume(s, &ingame_state);
         });
         state.optimizer.game_state_changed(false);
+        state.started_directly.store(false, Ordering::SeqCst);
+        // GOW-Port (issue #40): started directly and no window was ever opened: the launcher ends with the game (Steam sees the
+        // session end), unless the game failed, which opens the window with the reason.
+        if state.windowless.load(Ordering::SeqCst) {
+            if finished.failed {
+                *state.notice.lock().unwrap() = Some(StartNotice { finished: Some(finished), launch_error: None });
+                open_window(&finished_app);
+            } else {
+                state.optimizer.shutdown();
+                finished_app.exit(0);
+            }
+            return;
+        }
         if let Some(window) = finished_app.get_webview_window("main") {
             let _ = window.unminimize();
             let _ = window.set_focus();
@@ -277,10 +411,13 @@ fn start_game(app: AppHandle, window: WebviewWindow, state: State<'_, AppState>)
     state.optimizer.game_state_changed(true);
     let _ = app.emit("game-running", true);
     if settings.minimize_on_play {
+        let app = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(600));
             if app.state::<AppState>().game.lock().unwrap().is_some() {
-                let _ = window.minimize();
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.minimize();
+                }
             }
         });
     }
@@ -308,19 +445,19 @@ fn force_close(window: WebviewWindow) {
 
 // ---------------------------------------------------------------------------------------------- shell helpers
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_log(state: State<'_, AppState>) {
     let log = state.paths.last_log();
     let target = if log.exists() { log } else { state.paths.logs_dir() };
     let _ = shortcut::open_path(&target);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_install_log(state: State<'_, AppState>) {
     let _ = shortcut::open_path(&state.paths.logs_dir().join("install.log"));
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_optimizer_log(state: State<'_, AppState>) {
     let _ = shortcut::open_path(&state.paths.logs_dir().join("optimize.log"));
 }
@@ -372,7 +509,7 @@ fn report_mark(state: State<'_, AppState>, text: String) -> Result<bool, String>
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_directory(path: String) {
     let target = shortcut::folder_of(Path::new(&path));
     let _ = std::fs::create_dir_all(&target);
@@ -381,7 +518,7 @@ fn open_directory(path: String) {
 
 /// Opens the `textures` folder of the installation (creating it with its `replacements` folder, as the installer does).
 /// False when no game files are set yet.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_textures_folder(state: State<'_, AppState>) -> bool {
     let elf = state.snapshot().elf;
     let (Some(folder), Some(replacements)) = (game::textures_folder(&elf), game::texture_replacements_folder(&elf))
@@ -450,7 +587,7 @@ fn texture_pack_install(app: AppHandle, state: State<'_, AppState>) -> Result<()
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn create_shortcut(state: State<'_, AppState>, desktop: bool) -> bool {
     let Ok(executable) = std::env::current_exe() else { return false };
     shortcut::create(&executable, &state.paths.icon(), desktop).is_ok()
@@ -458,17 +595,17 @@ fn create_shortcut(state: State<'_, AppState>, desktop: bool) -> bool {
 
 // ---------------------------------------------------------------------------------------------- RetroAchievements
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ra_has_credential(user: String) -> bool {
     credential::has_retro_achievements(&user)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ra_save_credential(user: String, password: String) -> bool {
     credential::save_retro_achievements(&user, &password)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ra_clear_credential() -> bool {
     credential::clear_retro_achievements()
 }
@@ -476,7 +613,7 @@ fn ra_clear_credential() -> bool {
 // ---------------------------------------------------------------------------------------------- gamepad
 
 /// The joysticks the game saw the last time it ran (the controller picker's list); `None` before the first run.
-#[tauri::command]
+#[tauri::command(async)]
 fn pad_devices(state: State<'_, AppState>) -> Option<PadDeviceList> {
     controller::read(&state.paths.pad_devices_file())
 }
@@ -552,7 +689,7 @@ struct WizardInfo {
     default_destination: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn wizard_info(state: State<'_, AppState>) -> WizardInfo {
     let script = install_script(&state);
     let mut environment = installer::check_environment(script.as_deref());
@@ -564,12 +701,12 @@ fn wizard_info(state: State<'_, AppState>) -> WizardInfo {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn validate_iso(path: String) -> IsoValidation {
     iso::validate_iso(&path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn validate_destination(path: String) -> installer::DestinationValidation {
     installer::validate_destination(&path)
 }
@@ -577,7 +714,7 @@ fn validate_destination(path: String) -> installer::DestinationValidation {
 // ------------------------------------------------------------------------------------- translation patch in the wizard
 
 /// GOW-Port (0.3.0): checks a chosen `.xdelta` from its header; `None` when it can be applied.
-#[tauri::command]
+#[tauri::command(async)]
 fn iso_patch_check(path: String) -> Option<PatchError> {
     iso_patch::check_patch(Path::new(path.trim())).err()
 }
@@ -621,7 +758,7 @@ fn iso_patch_cancel(state: State<'_, AppState>) {
 // ------------------------------------------------------------------------------------- CHD disc image in the wizard
 
 /// GOW-Port (0.3.1): where the ISO of a chosen `.chd` goes and whether it fits; `None` when the CHD cannot be read.
-#[tauri::command]
+#[tauri::command(async)]
 fn iso_chd_plan(path: String) -> Option<ChdPlan> {
     iso_chd::plan(Path::new(path.trim())).ok()
 }
@@ -780,7 +917,7 @@ fn optimize_now(state: State<'_, AppState>) {
 // ---------------------------------------------------------------------------------------------- rebuild after an update
 
 /// Whether the game build in the installation folder is older than the runtime sources of the kit (see `gow_core::rebuild`).
-#[tauri::command]
+#[tauri::command(async)]
 fn rebuild_state(state: State<'_, AppState>) -> rebuild::RebuildState {
     let destination = state.snapshot().optimization_destination;
     if destination.trim().is_empty() {
@@ -860,6 +997,33 @@ fn update_open_release(app: AppHandle) -> bool {
 
 // ---------------------------------------------------------------------------------------------- startup
 
+/// When `run` began, and how long the setup hook took (both for `logs/launcher-startup.log`).
+static STARTED: OnceLock<Instant> = OnceLock::new();
+static SETUP_MS: AtomicU64 = AtomicU64::new(0);
+
+/// The interface drew its first screen with data. One line per start in `logs/launcher-startup.log` (the newest 200 are
+/// kept), so a report of a slow launcher says where the time went: the setup before the window, the page's own start
+/// (`script_ms`: WebView2 and the bundle, from the page's navigation) and the first calls (`boot_ms`).
+#[tauri::command(async)]
+fn startup_ready(state: State<'_, AppState>, script_ms: f64, boot_ms: f64) {
+    let total = STARTED.get().map_or(0, |started| started.elapsed().as_millis());
+    let line = format!(
+        "[startup] {} interface ready {total} ms after start (setup {} ms, page script at {script_ms:.0} ms, first calls {boot_ms:.0} ms)",
+        report::unix_now(),
+        SETUP_MS.load(Ordering::Relaxed),
+    );
+    append_startup_log(&state.paths, line);
+}
+
+fn append_startup_log(paths: &AppPaths, line: String) {
+    let file = paths.logs_dir().join("launcher-startup.log");
+    let mut lines: Vec<String> =
+        std::fs::read_to_string(&file).map(|text| text.lines().map(str::to_string).collect()).unwrap_or_default();
+    lines.push(line);
+    let keep = lines.len().saturating_sub(200);
+    let _ = std::fs::write(&file, lines[keep..].join("\n") + "\n");
+}
+
 fn prepare_data_directory(paths: &AppPaths) {
     let _ = std::fs::create_dir_all(paths.logs_dir());
     if !paths.icon().exists() {
@@ -893,6 +1057,90 @@ fn log_kit(paths: &AppPaths, line: &str) {
     }
 }
 
+/// Shows the launcher's window, creating it the first time (it is not created at start-up: a direct start never needs it, and
+/// skipping it skips WebView2).
+fn open_window(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.windowless.store(false, Ordering::SeqCst);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return;
+    }
+    let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main") else { return };
+    if let Err(error) = tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build()) {
+        if let Some(state) = app.try_state::<AppState>() {
+            append_startup_log(
+                &state.paths,
+                format!("[startup] {} the window could not be created: {error}", report::unix_now()),
+            );
+        }
+    }
+}
+
+/// GOW-Port (issue #40): opens the game without the window. `false` when the window has to open instead: the game is not
+/// ready (the window opens the wizard) or could not start (the window shows why).
+fn start_directly(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    state.direct_attempted.store(true, Ordering::SeqCst);
+    if let Some(reason) = direct::not_ready(&state.snapshot()) {
+        append_startup_log(
+            &state.paths,
+            format!("[startup] {} direct start: not ready ({reason}), opening the launcher", report::unix_now()),
+        );
+        return false;
+    }
+    state.windowless.store(true, Ordering::SeqCst);
+    match launch_game(app, &state) {
+        Ok(()) => {
+            state.started_directly.store(true, Ordering::SeqCst);
+            append_startup_log(
+                &state.paths,
+                format!(
+                    "[startup] {} direct start: game opened {} ms after start",
+                    report::unix_now(),
+                    STARTED.get().map_or(0, |started| started.elapsed().as_millis())
+                ),
+            );
+            true
+        }
+        Err(error) => {
+            state.windowless.store(false, Ordering::SeqCst);
+            *state.notice.lock().unwrap() = Some(StartNotice { finished: None, launch_error: Some(error) });
+            false
+        }
+    }
+}
+
+/// A second start of the launcher while one is running (the single-instance plugin hands its arguments here): a direct
+/// start opens the game if it is not open yet, anything else shows the window.
+fn second_start(app: &AppHandle, arguments: &[String]) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let mode = direct::start_mode(arguments, state.snapshot().skip_launcher, direct::launcher_key_held());
+    if mode == direct::StartMode::Direct {
+        if state.game.lock().unwrap().is_some() {
+            return;
+        }
+        if direct::not_ready(&state.snapshot()).is_none() {
+            match launch_game(app, &state) {
+                Ok(()) => return,
+                Err(error) => {
+                    let notice = StartNotice { finished: None, launch_error: Some(error) };
+                    // A window that is already open hears it now; a new one reads it when it boots.
+                    if app.get_webview_window("main").is_some() {
+                        let _ = app.emit("start-notice", notice);
+                    } else {
+                        *state.notice.lock().unwrap() = Some(notice);
+                    }
+                }
+            }
+        }
+    }
+    open_window(app);
+}
+
 fn load_settings(paths: &AppPaths) -> Settings {
     if paths.settings_file().exists() {
         return Settings::load(&paths.settings_file());
@@ -904,16 +1152,17 @@ fn load_settings(paths: &AppPaths) -> Settings {
 }
 
 pub fn run() {
+    STARTED.get_or_init(Instant::now);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_single_instance::init(|app, _arguments, _directory| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+        .plugin(tauri_plugin_single_instance::init(|app, arguments, _directory| {
+            // Off the event loop: it may start the game or build the window.
+            let app = app.clone();
+            std::thread::spawn(move || second_start(&app, &arguments));
         }))
         .setup(|app| {
+            let setup_started = Instant::now();
             let paths = AppPaths::system();
             prepare_data_directory(&paths);
             extract_kit(app, &paths);
@@ -944,12 +1193,24 @@ pub fn run() {
                 patch_cancel: Mutex::new(None),
                 chd_cancel: Mutex::new(None),
                 updater: updater::Updates::new(paths_logs.join("update.log")),
+                windowless: AtomicBool::new(false),
+                started_directly: AtomicBool::new(false),
+                direct_attempted: AtomicBool::new(false),
+                notice: Mutex::new(None),
             };
             state.optimizer.set_script(install_script(&state));
             configure_optimizer(&state, &settings);
             state.optimizer.spawn_timer();
             app.manage(state);
             updater::spawn_scheduler(app.handle().clone());
+            SETUP_MS.store(setup_started.elapsed().as_millis() as u64, Ordering::Relaxed);
+            // GOW-Port (issue #40): the window is created here (`"create": false` in tauri.conf.json), unless the game opens
+            // directly.
+            let arguments: Vec<String> = std::env::args().collect();
+            let mode = direct::start_mode(&arguments, settings.skip_launcher, direct::launcher_key_held());
+            if mode != direct::StartMode::Direct || !start_directly(app.handle()) {
+                open_window(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -975,12 +1236,20 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            startup_ready,
             patch_settings,
             reset_game_options,
             game_status,
             detect_paths,
             detected_iso,
-            memory_card_directory,
+            memory_card_file,
+            card_slots,
+            save_backups,
+            save_backup_slots,
+            backup_card_now,
+            restore_save_backup,
+            save_art,
+            load_save_slot,
             start_game,
             stop_game,
             is_game_running,
@@ -1026,6 +1295,24 @@ pub fn run() {
             update_install,
             update_open_release,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the launcher");
+        .build(tauri::generate_context!())
+        .expect("error while running the launcher")
+        .run(|app, event| match event {
+            // A window opened during a game that was started directly: closing it waits for the game, so the play time is
+            // counted and Steam does not see the game end early.
+            tauri::RunEvent::ExitRequested { api, code: None, .. } => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if state.started_directly.load(Ordering::SeqCst) && state.game.lock().unwrap().is_some() {
+                        state.windowless.store(true, Ordering::SeqCst);
+                        api.prevent_exit();
+                    }
+                }
+            }
+            tauri::RunEvent::Exit => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.optimizer.shutdown();
+                }
+            }
+            _ => {}
+        });
 }

@@ -5,11 +5,63 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <atomic>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "runtime/gs/gs_backend.h"
 #include "runtime/gs/ps2_gif_arbiter.h" // GOW-Port: keep the origin of each GIF stream.
+
+// GOW-Port: a recursive lock on top of std::mutex for GSFrontend::m_stateMutex. libc++ on Windows (llvm-mingw) makes
+// std::recursive_mutex a CRITICAL_SECTION: ~58 ns per lock contended by two threads, against ~31 ns for std::mutex (an
+// SRW lock), and the EE and the GS worker take this one for every GIF packet. Same semantics: the owning thread may lock
+// it again.
+class GSStateMutex
+{
+public:
+    void lock()
+    {
+        const std::thread::id self = std::this_thread::get_id();
+        if (m_owner.load(std::memory_order_relaxed) == self)
+        {
+            ++m_depth;
+            return;
+        }
+        m_mutex.lock();
+        m_owner.store(self, std::memory_order_relaxed);
+        m_depth = 1u;
+    }
+
+    bool try_lock()
+    {
+        const std::thread::id self = std::this_thread::get_id();
+        if (m_owner.load(std::memory_order_relaxed) == self)
+        {
+            ++m_depth;
+            return true;
+        }
+        if (!m_mutex.try_lock())
+            return false;
+        m_owner.store(self, std::memory_order_relaxed);
+        m_depth = 1u;
+        return true;
+    }
+
+    void unlock()
+    {
+        if (--m_depth == 0u)
+        {
+            m_owner.store(std::thread::id{}, std::memory_order_relaxed);
+            m_mutex.unlock();
+        }
+    }
+
+private:
+    std::mutex m_mutex;
+    std::atomic<std::thread::id> m_owner{};
+    uint32_t m_depth = 0u; // touched only by the owner
+};
 
 namespace GSSharedPresent { struct Frame; }
 
@@ -178,7 +230,9 @@ private:
 
     void processImageData(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeBytes);
-    GSPrimitiveBatch buildDrawBatch(int vertexCount) const;
+    // GOW-Port: fills m_batch for the draw being kicked. The state part is rebuilt only when a register that feeds it was
+    // written since the last build (m_drawStateDirty); returns true when it was NOT rebuilt (same bytes as the previous draw).
+    bool fillDrawBatch(int vertexCount);
     void updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch);
     GSPresentationRequest buildPresentationRequestUnlocked() const;
 
@@ -188,7 +242,7 @@ private:
     uint8_t *m_localMemoryStorage = nullptr;
     uint32_t m_localMemorySize = 0u;
     struct GSRegisters *m_privRegs = nullptr;
-    mutable std::recursive_mutex m_stateMutex;
+    mutable GSStateMutex m_stateMutex; // GOW-Port: was std::recursive_mutex (see GSStateMutex)
     mutable std::mutex m_backendLifetimeMutex;
     mutable std::mutex m_presentationMutex;
 
@@ -205,6 +259,8 @@ private:
     std::array<GifInputState, 4> m_gifInput{};
 
     GSContext m_ctx[2];
+    GSPrimitiveBatch m_batch{};       // GOW-Port: persistent draw batch (state kept between draws, see fillDrawBatch)
+    bool m_drawStateDirty = true;     // GOW-Port: set by every write of a register that is part of GSDrawState, and by reset()
     GSPrimReg m_prim{};
     GSPrimReg m_primRegister{};
     GSPrimReg m_prmodeRegister{};

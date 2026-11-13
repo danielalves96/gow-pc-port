@@ -1,4 +1,4 @@
-﻿//! Folders the launcher owns: organization `GOW_PC`, application `Launcher`. The first run imports the settings the old
+//! Folders the launcher owns: organization `GOW_PC`, application `Launcher`. The first run imports the settings the old
 //! Qt launcher left behind (see `legacy.rs`), so an upgrade keeps logs and shader cache in place.
 
 use std::path::{Path, PathBuf};
@@ -69,6 +69,11 @@ impl AppPaths {
 
     pub fn settings_file(&self) -> PathBuf {
         self.data.join("settings.json")
+    }
+
+    /// Written by the game while the player changes the cheats, overlay lines and image adjustments inside it (`ingame.rs`).
+    pub fn ingame_state_file(&self) -> PathBuf {
+        self.data.join("ingame-state.json")
     }
 
     pub fn shader_cache(&self) -> PathBuf {

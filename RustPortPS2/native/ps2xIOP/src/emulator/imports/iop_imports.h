@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace ps2x::iop::detail
@@ -26,6 +27,8 @@ namespace ps2x::iop::detail
 
         void reset();
         [[nodiscard]] std::optional<IopImportCall> decode(uint32_t pc) const;
+        // GOW-Port: drops the memoized decode() results (a module was loaded or unloaded)
+        void invalidateDecodeCache() { m_decodeCache.clear(); }
         [[nodiscard]] bool registerExportTable(uint32_t address);
         [[nodiscard]] bool releaseExportTable(uint32_t address);
         [[nodiscard]] uint32_t findTable(std::string_view library, std::optional<uint16_t> version = std::nullopt) const;
@@ -44,7 +47,18 @@ namespace ps2x::iop::detail
 
         [[nodiscard]] const ExportLibrary *findLibrary(std::string_view name, std::optional<uint16_t> version) const;
 
+        // GOW-Port: decode() result per stub address (the backward scan for the import table costs up to 64 KB of reads).
+        // A hit is re-validated against the stub's delay slot and the table's magic and library name.
+        struct DecodeEntry
+        {
+            uint32_t table = 0;
+            uint32_t delay = 0;
+            std::optional<IopImportCall> call;
+        };
+        [[nodiscard]] std::optional<IopImportCall> decodeUncached(uint32_t pc, uint32_t delay, uint32_t &tableOut) const;
+
         IopMemory &m_memory;
+        mutable std::unordered_map<uint32_t, DecodeEntry> m_decodeCache;
         std::map<uint32_t, ExportLibrary> m_libraries;
     };
 }

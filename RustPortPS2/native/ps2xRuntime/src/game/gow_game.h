@@ -10,9 +10,10 @@
 #include <cstddef>
 #include <string>
 
-int gowLogicFps(); // lib/gow_integration.cpp: PC_LOGIC_FPS (60 unless 120, 144, 165 or 240 and no 30 FPS cap)
+int gowLogicFps(); // lib/gow_integration.cpp: PC_LOGIC_FPS (60 or 120, never above kMaxFps; 60 with the 30 FPS cap)
 void gowNoteGameFlip(); // lib/gow_integration.cpp: the game swapped its display buffer
 void gowSetHangReportExtra(void (*report)(PS2Runtime &)); // lib/gow_integration.cpp: more [gow-hang] lines (diagnostics)
+void gowSetVBlankExtra(void (*callback)(uint8_t *rdram)); // lib/gow_integration.cpp: one more EE-thread callback per VBlank
 
 namespace gow_game
 {
@@ -54,6 +55,7 @@ namespace gow_game
     void gowGuardTimelineChannels(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowGuardNodeDestructor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowGuardCloneList(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void gowGuardPlayerUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowHeapZeroAlloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowFlashQueueDrain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowFlashQueueAppend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
@@ -67,9 +69,21 @@ namespace gow_game
     void gowMovieStreamService(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowMovieVideoRingWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowMovieNodata(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void gowMovieStreamRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x188848: the end of the file
+    void gowMovieTailAudio(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);  // 0x189A88: audio of the drain loop
+    void gowMovieCompletion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x189B00: last pictures
     void gowDiagBonusMovie(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowDiagStreamRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     size_t movieOverrideCount(); // entries of GOW_MOVIE_OVERRIDE
+
+    // ---- saves (gow_save.cpp) -----------------------------------------------------------------------------------------
+    void gowSaveWriteFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x22E800: observes a completed save
+    uint32_t gowSaveCompletedCount(); // saves the game completed in this session
+    // loading a slot from the launcher or the F2 menu (gow_save_load.cpp); GOW_SAVE_LOAD=0 leaves it out
+    void gowSaveLoadPoll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);     // pad read, once per frame
+    void gowSaveLoadGameplay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x21F3C8: gameplay frame
+    void gowSaveLoadPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);    // 0x21F638: pause menu frame
+    void gowSaveLoadMainMenu(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x21EBF8: main menu frame
 
     // ---- game logic rate (gow_logic_rate.cpp) ------------------------------------------------------------------------
     void gowLogicTimeStep(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);  // PC_LOGIC_FPS > 60 or GOW_HFPS_DIAG=1
@@ -88,6 +102,15 @@ namespace gow_game
     void gowDiagFlashReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowDiagAnimationTime(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowDiagAnimationDuration(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // GOW_MENU_DIAG=1 / GOW_NATIVE_CHEATS_MENU=1: bounded read-only observers of the original UI (gow_menu_diag.cpp).
+    void gowDiagMenuMessages(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime); // 0x1B8A48 LoadMessages
+    void gowDiagMenuShow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);     // 0x1B9358 ShowPrompt
+    void gowDiagMenuMovie(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);    // 0x1B7CE0 LoadMovie
+    // GOW_NATIVE_CHEATS_MENU=1 (gow_menu_diag.cpp): Port Options extension. BuildMovie 0x14AE68 hands the game a movie with
+    // the Port Options row and pages; the VBlank callback keeps the PS2_<cheat> HUD variables and the cheat engine in step.
+    void gowNativeMenuBuildMovie(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void gowNativeMenuVBlank(uint8_t *rdram);
 
     void gowDiagFilteredCopy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void gowDiagInitUnpack(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

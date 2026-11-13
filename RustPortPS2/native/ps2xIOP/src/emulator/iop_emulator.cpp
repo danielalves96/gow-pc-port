@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "imports/iop_cdvd.h"
 #include "core/iop_cpu.h"
+#include "core/iop_cpu_exec.h"
 #include "imports/iop_heaplib.h"
 #include "imports/iop_imports.h"
 #include "imports/iop_intrman.h"
@@ -152,6 +153,7 @@ namespace ps2x::iop::detail
             modules.clear();
             nativeRanges.clear();
             nativeOverrides.clear();
+            rebuildOverrideBits();
             imports.reset();
             rpc.reset();
             cdvd.reset();
@@ -476,7 +478,9 @@ namespace ps2x::iop::detail
             }
 
             // GOW-Port: IRX functions replaced by native C++ run instead of the function (then return to $ra).
-            if (!nativeOverrides.empty())
+            // GOW-Port: step() runs once per native segment / interpreted instruction; a 64 KB bitmap (one bit per word of IOP
+            // RAM, set only at the ~27 override addresses) rejects the common case before the hash lookup.
+            if (!nativeOverrides.empty() && overrideBit(physicalAddress(cpu.pc)))
                 if (const auto found = nativeOverrides.find(physicalAddress(cpu.pc)); found != nativeOverrides.end())
                 {
                     IopNativeCall call{cpu, memory, host, *this};
@@ -526,6 +530,51 @@ namespace ps2x::iop::detail
             return running;
         }
 
+        // GOW-Port: runs plain interpreted instructions in a tight loop (the interpreter inlined, no per-instruction call
+        // chain) and stops, before executing anything, at the first instruction that step() treats differently: a jr ra
+        // (possible import stub), an override address, compiled code, a pending interrupt, or when a DMA / guest
+        // callback is queued (runCpu services those after every instruction). Everything it executes is exactly what
+        // step() does for a plain instruction, so the behaviour is unchanged. Returns the instructions executed.
+        uint32_t runInterpretedBurst(CpuState &cpu, uint32_t maxInstructions)
+        {
+            if (maxInstructions == 0u || !nativeRanges.empty() || pcEvery != 0ULL)
+                return 0u;
+            uint32_t done = 0u;
+            while (done < maxInstructions)
+            {
+                if (cpu.stopped || cpu.yielded)
+                    break;
+                const uint32_t pc = cpu.pc;
+                if (pc == kThreadReturnSentinel || pc == kCallReturnSentinel || physicalAddress(pc) >= kRamSize)
+                    break;
+                if ((cpu.cop0[12] & 3u) == 1u && memory.interruptControl() != 0u &&
+                    (memory.interruptStatus() & memory.interruptMask()) != 0u)
+                    break;
+                const uint32_t word = memory.fetch32(pc);
+                if (word == 0x03E00008u)
+                    break;
+                if (overrideBit(physicalAddress(pc)))
+                    break;
+                const bool running = iopExecute(cpu, memory, word, pc);
+                ++interpretedInstructions;
+                ++totalInstructions;
+                ++totalCycles;
+                ++done;
+                schedulePendingDma();
+                if (!running)
+                    break;
+                // runCpu services whatever became due after every instruction
+                if (!pendingGuestCallbacks.empty() && pendingGuestCallbacks.begin()->first <= totalCycles)
+                    break;
+                bool dmaDue = false;
+                for (const auto &entry : pendingDmaInterrupts)
+                    dmaDue |= entry.second <= totalCycles;
+                if (dmaDue)
+                    break;
+            }
+            return done;
+        }
+
         uint32_t runCpu(CpuState &cpu, uint32_t instructionBudget)
         {
             CpuState *previous = activeCpu;
@@ -540,6 +589,17 @@ namespace ps2x::iop::detail
                     servicePendingDmaInterrupts();
                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
                     servicePendingGuestCallbacks();
+                if (!cpu.stopped && !cpu.yielded && totalInstructions - start < instructionBudget &&
+                    runInterpretedBurst(cpu, static_cast<uint32_t>(instructionBudget - (totalInstructions - start))) != 0u)
+                {
+                    if (cpu.stopped)
+                        break; // as when step() returns false
+                    // the same servicing the loop does after each instruction
+                    if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
+                        servicePendingDmaInterrupts();
+                    if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
+                        servicePendingGuestCallbacks();
+                }
             }
             activeCpu = previous;
             return static_cast<uint32_t>(totalInstructions - start);
@@ -892,6 +952,7 @@ namespace ps2x::iop::detail
             module.gp = loaded.gp;
             module.textSize = loaded.textSize != 0u && loaded.textSize <= loaded.size ? loaded.textSize : loaded.size;
             attachNative(module);
+            imports.invalidateDecodeCache(); // GOW-Port: a new import table may change what a stub resolves to
 
             // GOW-Port: like the real loadcore, the module starts with start(argc, argv): argv[0] is the module's
             // path and the arguments come separated by '\0' ("rpc_priority=64\0..."). Before, it passed
@@ -976,6 +1037,7 @@ namespace ps2x::iop::detail
                 for (size_t i = 0; i < overrideCount; ++i)
                     if (ident == overrides[i].module && overrides[i].offset < module.textSize)
                         nativeOverrides[lo + overrides[i].offset] = &overrides[i];
+                rebuildOverrideBits();
             }
             size_t count = 0;
             const IopNativeModule *table = iopNativeModules(count);
@@ -1024,6 +1086,7 @@ namespace ps2x::iop::detail
             const uint32_t lo = physicalAddress(it->second.base);
             std::erase_if(nativeRanges, [&](const NativeRange &r) { return r.lo == lo; });
             std::erase_if(nativeOverrides, [&](const auto &kv) { return kv.first >= lo && kv.first < lo + it->second.size; });
+            rebuildOverrideBits();
             rpc.removeServersInRange(it->second.base, it->second.size);
             imports.eraseRange(it->second.base, it->second.size);
             modules.erase(it);
@@ -1052,6 +1115,23 @@ namespace ps2x::iop::detail
         std::map<int, Module> modules;
         std::vector<NativeRange> nativeRanges;
         std::unordered_map<uint32_t, const IopNativeOverride *> nativeOverrides; // physical address -> handler
+        // GOW-Port: one bit per word of IOP RAM that has an entry in nativeOverrides (a pre-filter, see step()).
+        std::vector<uint64_t> overrideBits = std::vector<uint64_t>(kRamSize / 4u / 64u, 0u);
+        bool overrideBit(uint32_t physical) const noexcept
+        {
+            const uint32_t word = physical >> 2;
+            return (overrideBits[word >> 6] >> (word & 63u)) & 1u;
+        }
+        void rebuildOverrideBits()
+        {
+            std::fill(overrideBits.begin(), overrideBits.end(), uint64_t{0});
+            for (const auto &entry : nativeOverrides)
+                if (entry.first < kRamSize)
+                {
+                    const uint32_t word = entry.first >> 2;
+                    overrideBits[word >> 6] |= uint64_t{1} << (word & 63u);
+                }
+        }
 
         // IopNativeServices (for the native IRX overrides)
         void callGuestLater(uint32_t function, uint32_t gp, uint32_t a0, uint32_t a1, uint64_t delayCycles) override

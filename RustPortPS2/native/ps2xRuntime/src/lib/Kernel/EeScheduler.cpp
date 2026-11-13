@@ -4,6 +4,7 @@
 #include "runtime/ps2_perf.h"
 #include "../gow_frame_metrics.h" // GOW-Port: GOW_FRAME_DIAG
 #include "ps2_runtime_macros.h"
+#include "../gow_host_wait.h" // GOW-Port: timed waits without the libc++ spin on Windows
 
 #include <algorithm>
 #include <cassert>
@@ -64,8 +65,7 @@ namespace
     // pacing points get as many per field as N/60 to keep ~1 ms of resolution per logic frame.
     uint64_t paceSteps()
     {
-        static const uint64_t steps = kPaceSteps * static_cast<uint64_t>(std::max(60, gowLogicFps())) / 60u;
-        return steps;
+        return kPaceSteps * static_cast<uint64_t>(std::max(60, gowLogicFps())) / 60u; // the FPS limit can change in game
     }
 
     template <typename Map>
@@ -1907,7 +1907,11 @@ void EeScheduler::pollGsInterrupt()
     const uint32_t masked = static_cast<uint32_t>(gs.imr >> 8) & 0x3u;
     const uint32_t active = csr & ~masked;
     const uint32_t rising = active & ~g_gsIrqLatched;
-    const auto now = std::chrono::steady_clock::now();
+    // GOW-Port: this runs at every scheduler checkpoint; the host clock is only needed for a new edge or a FINISH waiting for
+    // its handler, not on the common path where CSR has nothing active.
+    std::chrono::steady_clock::time_point now{};
+    if (rising != 0u || (active & 0x2u) != 0u)
+        now = std::chrono::steady_clock::now();
     g_gsIrqLatched = active;
     if (rising != 0u)
     {
@@ -1977,6 +1981,17 @@ void EeScheduler::processPendingEvents()
         }
     }
     pollGsInterrupt();
+    // GOW-Port: fast path. Nothing was posted (postEvent sets the flag under the lock after queueing), no cycle deadline is
+    // due and no stop is pending: the locked block below would only store `false` again, and the deque swap allocates.
+    if (!m_checkpointPending.load(std::memory_order_acquire) && !m_stopRequested.load(std::memory_order_acquire))
+    {
+        const uint64_t nextCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+        if (nextCycle == 0u || m_eeCycle < nextCycle)
+        {
+            applyPendingPreemption();
+            return;
+        }
+    }
     std::deque<EeEvent> pending;
     {
         std::lock_guard lock(m_eventMutex);
@@ -1999,13 +2014,24 @@ void EeScheduler::processPendingEvents()
 
 void EeScheduler::processDueDeadlines()
 {
+    // GOW-Port: fast path for the common call (every scheduler checkpoint): m_nextDeadlineCycle is the earliest cycle of any
+    // scheduled deadline, so while the EE has not reached it nothing is due. The locked scan, the host clock read and the
+    // recomputation of the next deadline (unchanged) are skipped; updateNextDeadline() always raised limitsChanged, which is
+    // kept.
+    {
+        const uint64_t nextCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+        if (nextCycle != 0u && m_eeCycle < nextCycle)
+        {
+            m_clock.limitsChanged.store(true, std::memory_order_seq_cst);
+            return;
+        }
+    }
     for (;;)
     {
         std::vector<ScheduledEvent> due;
         std::chrono::steady_clock::time_point pacingDeadline{};
         {
             std::unique_lock lock(m_eventMutex);
-            const auto now = std::chrono::steady_clock::now();
             for (const ScheduledEvent &item : m_deadlines)
             {
                 if (item.deadlineCycle <= m_eeCycle &&
@@ -2022,13 +2048,13 @@ void EeScheduler::processDueDeadlines()
                 return;
             }
 
-            if (now < pacingDeadline)
+            if (std::chrono::steady_clock::now() < pacingDeadline) // GOW-Port: read only when a deadline is due
             {
                 // GOW-Port: sleeping until the host VBlank/timer deadline is waiting, not EE work (ee_ms).
                 ps2_perf::Scope waitPerf(ps2_perf::Bucket::GuestWait);
-                m_eventCv.wait_until(lock, pacingDeadline, [this]()
-                                     { return !m_events.empty() ||
-                                              m_stopRequested.load(std::memory_order_acquire); });
+                gowWaitUntil(m_eventCv, lock, pacingDeadline, [this]() // GOW-Port: was m_eventCv.wait_until
+                             { return !m_events.empty() ||
+                                      m_stopRequested.load(std::memory_order_acquire); });
                 if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
                 {
                     updateNextDeadline();
@@ -2294,9 +2320,10 @@ void EeScheduler::waitForEvent()
         }
     }
 
-    const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
-                                               { return !m_events.empty() ||
-                                                        m_stopRequested.load(std::memory_order_acquire); });
+    // GOW-Port: gowWaitUntil (was m_eventCv.wait_until), see gow_host_wait.h.
+    const bool signaled = gowWaitUntil(m_eventCv, lock, hostDeadline, [this]()
+                                       { return !m_events.empty() ||
+                                                m_stopRequested.load(std::memory_order_acquire); });
     if (!signaled)
     {
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;

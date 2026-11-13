@@ -341,13 +341,22 @@ public:
     bool registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
     bool hasFunction(uint32_t address) const;
-    bool dispatchGuestBranch(uint8_t *rdram,
-                             R5900Context *ctx,
-                             uint32_t targetPc,
-                             uint32_t sourcePc,
-                             uint32_t fallthroughPc,
-                             GuestBranchKind kind,
-                             const char *debugName);
+    // GOW-Port: inline (below the class): a call to a recompiled function with no diagnostic watching it goes straight
+    // to the function table; everything else through dispatchGuestBranchSlow, the former out-of-line dispatcher.
+    inline bool dispatchGuestBranch(uint8_t *rdram,
+                                    R5900Context *ctx,
+                                    uint32_t targetPc,
+                                    uint32_t sourcePc,
+                                    uint32_t fallthroughPc,
+                                    GuestBranchKind kind,
+                                    const char *debugName);
+    bool dispatchGuestBranchSlow(uint8_t *rdram,
+                                 R5900Context *ctx,
+                                 uint32_t targetPc,
+                                 uint32_t sourcePc,
+                                 uint32_t fallthroughPc,
+                                 GuestBranchKind kind,
+                                 const char *debugName);
     void reportMissingFunction(uint8_t *rdram,
                                R5900Context *ctx,
                                uint32_t targetPc,
@@ -599,5 +608,60 @@ extern const uint32_t g_ps2RecompiledFunctionTableBase;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
 extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
+
+// GOW-Port: state shared by dispatchGuestBranch's inline fast path and the slow path (ps2_runtime.cpp).
+struct GowBranchRec { uint32_t src, dst, ra, kind; };
+extern GowBranchRec g_gowRing[256];
+extern std::atomic<uint32_t> g_gowRingPos;
+extern thread_local uint64_t g_guestJumpSerial;
+extern bool g_ps2DispatchFast;
+extern uint32_t g_ps2DispatchWatchPc;
+// EeScheduler::kGuestDispatchCycles (EeScheduler is incomplete here; ps2_runtime.cpp checks they match).
+inline constexpr uint32_t kGuestDispatchCyclesInline = 8u;
+
+// GOW-Port: the slow path's call case (ps2_runtime.cpp, dispatchGuestBranchSlow) without its diagnostics: the branch
+// ring, the dispatch cycles and checkpoint, the call, the same return rules. Taken for direct and indirect calls to a
+// function in the table that is not the frame function the perf counters watch; anything else - jumps, missing
+// functions, GOW_FAST_DISPATCH=0, entry diagnostics - goes the slow way. Idea from gta-vcs-recomp (its inline
+// dispatchGuestBranch).
+inline bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+                                            R5900Context *ctx,
+                                            uint32_t targetPc,
+                                            uint32_t sourcePc,
+                                            uint32_t fallthroughPc,
+                                            GuestBranchKind kind,
+                                            const char *debugName)
+{
+    if ((kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) && g_ps2DispatchFast &&
+        targetPc != g_ps2DispatchWatchPc && m_eeScheduler)
+    {
+        const uint32_t offset = targetPc - g_ps2RecompiledFunctionTableBase;
+        const uint32_t slot = offset >> 2;
+        if ((offset & 3u) == 0u && targetPc >= g_ps2RecompiledFunctionTableBase &&
+            targetPc < g_ps2RecompiledFunctionTableEnd && slot < g_ps2RecompiledFunctionTableSlotCount)
+        {
+            const RecompiledFunction fn = g_ps2RecompiledFunctionTable[slot];
+            if (fn != nullptr)
+            {
+                const uint32_t pos = g_gowRingPos.load(std::memory_order_relaxed);
+                g_gowRingPos.store(pos + 1u, std::memory_order_relaxed);
+                g_gowRing[pos & 255u] = {sourcePc, targetPc, static_cast<uint32_t>(_mm_cvtsi128_si32(ctx->r[31])),
+                                         static_cast<uint32_t>(kind)};
+                ctx->pc = targetPc;
+                if (eeCheckpointDue(kGuestDispatchCyclesInline)) // EeScheduler::kGuestDispatchCycles
+                    return false;
+                const uint64_t checkpointSerial = m_eeCheckpointSerial;
+                const uint64_t jumpSerial = g_guestJumpSerial;
+                fn(rdram, ctx, this);
+                if (m_stopRequested.load(std::memory_order_relaxed) || ctx->pc == 0u)
+                    return false;
+                if (ctx->pc == targetPc && m_eeCheckpointSerial == checkpointSerial && jumpSerial == g_guestJumpSerial)
+                    ctx->pc = fallthroughPc;
+                return ctx->pc == fallthroughPc;
+            }
+        }
+    }
+    return dispatchGuestBranchSlow(rdram, ctx, targetPc, sourcePc, fallthroughPc, kind, debugName);
+}
 
 #endif // PS2_RUNTIME_H

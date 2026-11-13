@@ -131,6 +131,8 @@ pub fn start(
     for (name, value) in &plan.set {
         command.env(name, value);
     }
+    // Where the game writes what the player changes inside it (the launcher reads it when the game ends, `ingame.rs`).
+    command.env("GOW_INGAME_STATE", paths.ingame_state_file());
     let mut child = command.spawn().map_err(|error| LaunchError::LogOpen(error.to_string()))?;
     let session = GameSession { pid: child.id() };
     let started = Instant::now();

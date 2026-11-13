@@ -73,6 +73,50 @@ if ($env:ComSpec -and (Test-Path -LiteralPath $env:ComSpec)) {
     Write-Host '  skip the live loader check (no Windows command interpreter on this system)'
 }
 
+# GOW-Port (issue #39): one broken way of downloading (Invoke-WebRequest failing with "The system cannot find the file specified")
+# ended the installation for every tool. Every download goes through Fetch, which tries the next way and checks the SHA-256. Run
+# here with fake ways, without the network.
+Write-Host 'downloads (issue #39): every one goes through Fetch, which falls back and checks the SHA-256'
+$downloaders = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and
+            @('Invoke-WebRequest', 'Start-BitsTransfer', 'iwr', 'curl', 'wget') -contains $n.GetCommandName() }, $true) |
+        Where-Object {
+            $node = $_.Parent
+            while ($node -and -not ($node -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $node = $node.Parent }
+            -not $node -or $node.Name -ne 'FetchWith'
+        } | ForEach-Object { "line $($_.Extent.StartLineNumber)" })
+Expect 'no download outside FetchWith' '' ($downloaders -join ', ')
+. ([scriptblock]::Create((Get-ScriptFunction 'FileSha256')))
+. ([scriptblock]::Create((Get-ScriptFunction 'Fetch')))
+$work = Join-Path ([IO.Path]::GetTempPath()) "gow-fetch-test-$PID"
+New-Item -ItemType Directory -Force -Path $work | Out-Null
+try {
+    $good = Join-Path $work 'good.bin'
+    [IO.File]::WriteAllText($good, 'the expected bytes')
+    $sha = FileSha256 $good
+    $script:tried = @()
+    function FetchWith([string]$method, [string]$url, [string]$target) {
+        $script:tried += $method
+        switch ($method) {
+            'Invoke-WebRequest' { throw 'The system cannot find the file specified' }
+            'HttpClient' { [IO.File]::WriteAllText($target, 'a captive portal page') }
+            default { Copy-Item -LiteralPath $good -Destination $target }
+        }
+    }
+    $target = Join-Path $work 'sub\tool.zip'
+    Fetch 'tool' 'https://example.invalid/tool.zip' $target $sha *> $null
+    Expect 'a failed and a wrong download are skipped' 'Invoke-WebRequest,HttpClient,curl' ($script:tried -join ',')
+    Expect 'the file that arrived is the expected one' $sha (FileSha256 $target)
+    $script:tried = @()
+    Fetch 'tool' 'https://example.invalid/tool.zip' $target $sha *> $null
+    Expect 'a file already in place (saved by hand) is used without downloading' '' ($script:tried -join ',')
+    function FetchWith([string]$method, [string]$url, [string]$target) { throw 'offline' }
+    [IO.File]::WriteAllText($target, 'a broken file')
+    $message = try { Fetch 'tool' 'https://example.invalid/tool.zip' $target $sha *> $null; '' } catch { $_.Exception.Message }
+    Expect 'when every way fails the error says where to save the file by hand' $true ($message -like "*save it as $target*")
+    Expect 'a wrong file in place is not kept' $false (Test-Path -LiteralPath $target)
+}
+finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+
 # GOW-Port: PowerShell names ignore case, so `$compiler = ...` inside a function hid the -Compiler parameter and the clang
 # build silently used MSVC. No function of install.ps1 may assign a variable named like one of the script's parameters.
 Write-Host 'parameters: no function assigns a variable of the same name (names ignore case)'

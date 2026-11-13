@@ -135,13 +135,15 @@ internal scale and stretched to the window, so the horizontal detail per degree 
 is advisable at 32:9); and with the menu background showing, `F = 1/A` crops the picture vertically, which at 32:9 keeps
 only about 37 % of the original height.
 
-**Frame-rate limits.** `PC_GAME_FPS=30` caps the game at 30. `PC_LOGIC_FPS=<120|144|165|240>` (experimental, unset by
-default) runs the game logic at that rate (`src/game/gow_logic_rate.cpp`: the frame end waits for 1/N s slots of guest
-time and the time step floor becomes 60/N fields, so the game keeps real-time speed); the launcher's FPS limit
-(60 / 120 / 240) sets it. With it, `GSHostPresentation::prepare` latches a new picture on each game buffer swap
+**Frame-rate limits.** `PC_GAME_FPS=30` caps the game at 30. `PC_LOGIC_FPS=120` (unset by default; the project never runs
+above 120, `kMaxFps` in `lib/gow_frame.h`, and a higher value gets 120) runs the game logic at that rate
+(`src/game/gow_logic_rate.cpp`: the frame end waits for 1/N s slots of guest time and the time step floor becomes 60/N
+fields, so the game keeps real-time speed); the launcher's FPS limit (60 / 120) sets it. With it, `GSHostPresentation::prepare` latches a new picture on each game buffer swap
 (`gowGameFlipCount`, counted by the display setup) and on the VBlank only after two VBlanks without a swap; at 60 it
-latches on each VBlank. `PC_WINDOW_FPS` (60 by default, 0 unlimited, clamped to 30–360) sets the host loop's
-`SetTargetFPS`; the launcher passes the display's refresh rate. `PC_VSYNC=1` requests the vsync hint instead.
+latches on each VBlank. `PC_WINDOW_FPS` (60 by default, clamped to 30–120; 0, which used to mean unlimited,
+gives 120) sets the host loop's `SetTargetFPS`; the launcher passes 60 with the 60 limit (the loop then follows the game's VBlank, `hostSyncToVBlank`) and the display's
+refresh rate, at most 120, with the 120 one. `PC_VSYNC=1` requests the vsync hint instead, honoured only on a display of 120 Hz
+or less (`applyWindowVsync`): with it the timer follows the display, above that the window follows the game's VBlank.
 
 ## 3. Texture replacement
 
@@ -202,6 +204,19 @@ the first 400 textures, plus each upload, under the `[gow-texrepl]` tag. Format,
   sample; batches that need it are marked as soft blends.
 - **No software fallback.** A primitive or a view the renderer cannot express is dropped with a counted reason
   (`[gs-hw-skip]`, dumped with `GOW_GS_HW_DUMP`), not rasterized somewhere else.
+
+## 7. Internal scale below 1x and effect switches
+
+- **Below 1x.** `PS2X_GS_HW_SCALE` accepts 0.25 to the GPU's limit (the launcher offers 0.25, 0.5 and 0.75 for integrated
+  GPUs). Every size in the backend already follows the float `scale` (render targets are `ceil(px * scale)`, scissors, vertex
+  offsets, presentation), and the scaler stretches the picture to the window. Checked on a Radeon RX 6600: 0.75x is clean;
+  **0.5x shows a tinted rectangle across the centre of bright, bloom-heavy scenes** (the altar light), which `GOW_GS_RT_SHIFT=0` does not
+  remove, so it is not the filtered-read shift. Cause not found; the launcher says so next to the 0.5x and 0.25x options.
+- **Effect switches** (`gs_frontend.cpp`, Performance tab): a masked primitive is never submitted, and the next draw rebuilds
+  its state (`m_drawStateDirty`). Shadow volumes are untextured, `COLCLAMP` off, `ALPHA = 0x68`; additive 3D effects are
+  `ALPHA` with a = 0, b = 2, d = 1 and the Z test on (the HUD and screen flashes keep it off); the game's full-screen present copy is never
+  masked. `GOW_FX_FILTER=0` forces nearest sampling except for that copy. Checked at the Athens altar: with the switches off the
+  light beam and glow disappear and the rest of the picture is the same.
 
 ## 5. Verification tooling
 

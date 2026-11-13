@@ -23,6 +23,14 @@ const FIRST_CHECK_DELAY: Duration = Duration::from_secs(8);
 /// How often the scheduler looks at what changed (a release found, the game closed...), not how often it asks GitHub.
 const TICK: Duration = Duration::from_secs(20);
 const PROGRESS_EVERY: Duration = Duration::from_millis(120);
+/// Waits before the second and third download attempts. A download that dies halfway ("error decoding response body", a
+/// 504 from GitHub's file host) usually works on the next try; players saw it fail up to three times in a row before.
+const DOWNLOAD_RETRY_WAITS: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(10)];
+
+/// A network failure is worth another attempt; a bad signature or package is not.
+fn worth_retrying(error: &tauri_plugin_updater::Error) -> bool {
+    matches!(error, tauri_plugin_updater::Error::Reqwest(_) | tauri_plugin_updater::Error::Network(_))
+}
 
 /// The release found by the check, and its installer once downloaded (kept when the install had to wait).
 struct Pending {
@@ -231,29 +239,43 @@ fn run_install(app: &AppHandle) {
     let bytes = match bytes {
         Some(bytes) => bytes,
         None => {
-            updates.set(app, |state| {
-                state.phase = Phase::Downloading;
-                state.done = 0;
-                state.total = 0;
-                state.error.clear();
-            });
-            let (mut done, mut last_report) = (0u64, Instant::now());
-            let downloaded = tauri::async_runtime::block_on(update.download(
-                |chunk, total| {
-                    done += chunk as u64;
-                    if last_report.elapsed() >= PROGRESS_EVERY {
-                        last_report = Instant::now();
-                        updates.set(app, |state| {
-                            state.done = done;
-                            state.total = total.unwrap_or(0);
-                        });
-                    }
-                },
-                || {},
-            ));
-            match downloaded {
-                Ok(bytes) => bytes,
-                Err(error) => return fail(update, None, error.to_string()),
+            let mut attempt = 0usize;
+            loop {
+                updates.set(app, |state| {
+                    state.phase = Phase::Downloading;
+                    state.done = 0;
+                    state.total = 0;
+                    state.error.clear();
+                });
+                let (mut done, mut last_report) = (0u64, Instant::now());
+                let downloaded = tauri::async_runtime::block_on(update.download(
+                    |chunk, total| {
+                        done += chunk as u64;
+                        if last_report.elapsed() >= PROGRESS_EVERY {
+                            last_report = Instant::now();
+                            updates.set(app, |state| {
+                                state.done = done;
+                                state.total = total.unwrap_or(0);
+                            });
+                        }
+                    },
+                    || {},
+                ));
+                match downloaded {
+                    Ok(bytes) => break bytes,
+                    Err(error) => match DOWNLOAD_RETRY_WAITS.get(attempt) {
+                        Some(wait) if worth_retrying(&error) => {
+                            updates.log(&format!(
+                                "download of {} failed ({error}); trying again in {} s",
+                                update.version,
+                                wait.as_secs()
+                            ));
+                            std::thread::sleep(*wait);
+                            attempt += 1;
+                        }
+                        _ => return fail(update, None, error.to_string()),
+                    },
+                }
             }
         }
     };
@@ -354,5 +376,13 @@ mod tests {
     fn the_release_page_opens_only_on_github() {
         assert!(update::trusted_url("https://github.com/danielalves96/gow-pc-port/releases/tag/launcher-v0.2.0"));
         assert!(!update::trusted_url("https://example.com/releases"));
+    }
+
+    #[test]
+    fn only_network_failures_are_downloaded_again() {
+        use tauri_plugin_updater::Error;
+        assert!(worth_retrying(&Error::Network("Download request failed with status: 504 Gateway Timeout".into())));
+        assert!(!worth_retrying(&Error::ReleaseNotFound));
+        assert!(!worth_retrying(&Error::SignatureUtf8("not base64".into())));
     }
 }

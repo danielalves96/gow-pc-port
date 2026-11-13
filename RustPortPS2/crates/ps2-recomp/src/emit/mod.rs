@@ -4,4 +4,6 @@
 
 pub mod function;
 pub mod function_table;
+pub mod lean;
 pub mod locals;
+pub mod ramgroup;

@@ -42,7 +42,7 @@ Rust e depois compilado como um programa de PC comum. O hardware do PlayStation 
 unidade vetorial, processador de I/O, som, controle, cartão de memória - é implementado de forma nativa. Nada
 interpreta o código do jogo em tempo de execução.
 
-O resultado é o jogo na lógica original de 60 Hz (ou num limite de 120 FPS, ou no experimental de 240, na mesma velocidade), com
+O resultado é o jogo na lógica original de 60 Hz (ou num limite de 120 FPS, o máximo, na mesma velocidade), com
 renderizador OpenGL de 1× a 8× de resolução interna, vídeos
 nativos com som, um launcher com ajustes, teclado e mouse, menu de cheats, mira travada, widescreen, packs de texturas
 personalizadas e RetroAchievements.
@@ -52,7 +52,7 @@ personalizadas e RetroAchievements.
 | | Um emulador (ex.: PCSX2) | Este port |
 |---|---|---|
 | Como o jogo roda | Executa o binário MIPS original instrução por instrução | **Traduz para C++ uma vez** e compila isso em `gow-2005` |
-| Hardware do PS2 | Emulado: CPU, GS, VU, IOP, DMA, timers… | **Serviços nativos**: GS em OpenGL, microcódigo de VU1 compilado antecipadamente, módulos IRX do jogo compilados para C++ pelo passo de otimização |
+| Hardware do PS2 | Emulado: CPU, GS, VU, IOP, DMA, timers… | **Serviços nativos**: GS em OpenGL, microcódigo de VU1 compilado antecipadamente, módulos IRX do jogo compilados para C++ na instalação, a partir do disco (sem abrir o jogo) |
 | BIOS | Exige um dump da BIOS do PS2 | **Nenhuma.** Os serviços de kernel e biblioteca são implementados no runtime |
 | Seu disco | Montado/emulado a cada execução | Lido uma vez na instalação; depois os arquivos extraídos são lidos por código nativo de disco |
 | O que você executa | Um aplicativo de console dentro de uma máquina virtual | Um executável nativo comum, `gow-2005` |
@@ -64,7 +64,7 @@ nativas das bibliotecas que ele chama.
 
 ## Recursos
 
-- **Renderizador nativo** - OpenGL 4.6, render targets na GPU, resolução interna de 1× a 8×, upscaling bicúbico (com
+- **Renderizador nativo** - OpenGL 4.6, render targets na GPU, resolução interna de 0,25× a 8× (abaixo de 1× para GPUs integradas), upscaling bicúbico (com
   nitidez), bilinear ou pixel, FXAA, modo progressivo 480p, ajuste de brilho/contraste/gama/saturação.
 - **Widescreen (Hor+)** - 16:9, 16:10, 21:9 (experimental) e 32:9 (muito experimental: HUD e menus esticados) pelo patch do PCSX2, com chave; desligado mostra o 4:3 original.
 - **Vídeos** - MPEG-2 decodificado nativamente, com som, incluindo as versões widescreen do próprio jogo.
@@ -72,10 +72,11 @@ nativas das bibliotecas que ele chama.
   Windows e no Linux.
 - **Qualidade de vida** - menu de cheats (**F2**, nove cheats), mira travada (**Alt**), combate ágil, informações na tela com FPS, GPU, CPU e RAM (cada uma opcional),
   tela cheia.
-- **Saves** - cartão `Mcd001.ps2` compatível com o PCSX2, nos dois sentidos.
+- **Saves** - cartão `Mcd001.ps2` compatível com o PCSX2, nos dois sentidos. Uma cópia datada do cartão é guardada a cada save num altar. A aba Saves do launcher mostra cada save com o altar, a miniatura, a dificuldade e o tempo de jogo, carrega um deles mesmo com o jogo aberto e restaura uma cópia.
 - **Texturas personalizadas** - packs de substituição do PCSX2, com o pack da comunidade baixável pelo launcher.
+- **Steam e atalhos**: o launcher pode abrir o jogo direto, sem a janela dele, e fechar junto com o jogo, então dá para adicioná-lo à Steam como jogo não Steam ([`docs/LAUNCHER.md`](docs/LAUNCHER.md#starting-the-game-without-the-launcher)).
 - **RetroAchievements** - login, notificações no jogo e modo hardcore que desativa os cheats.
-- **Launcher** - oito abas, assistente de instalação, otimização em segundo plano, inglês e português do Brasil.
+- **Launcher** - nove abas, assistente de instalação, otimização em segundo plano, inglês e português do Brasil.
 
 ## Suporte por plataforma
 
@@ -183,13 +184,17 @@ O resto - lista completa de cheats, regras da mira travada, combate ágil, cart�
 ## Desempenho
 
 O jogo roda a 60 FPS por padrão, a taxa do próprio PS2, sempre na velocidade real: quadros atrasados são descartados,
-nunca desacelerados. O limite de 120 FPS do launcher e o de 240 (**experimental**) rodam a lógica do jogo nessa taxa, mais
-fluido mas nunca mais rápido; a janela atualiza na taxa do monitor.
+nunca desacelerados. O limite de 120 FPS do launcher roda a lógica do jogo nessa taxa, mais fluido mas nunca mais rápido;
+em 60 a janela segue os quadros do próprio jogo, em 120 atualiza na taxa do monitor, no máximo 120. Nada roda acima de 120 FPS: além disso um PC fraco não fica mais
+fluido, só mais quente.
 
 - **Resolução interna 2× é o ponto ideal.** 3× ou mais é pesado e, em placas intermediárias, pode travar a apresentação.
 - O lado da CPU é dominado pela **VU1** (unidade vetorial). Cada passe de otimização converte mais dela em código nativo:
   rode `install.cmd -Optimize` / `./install.sh --optimize` depois de jogar áreas novas, ou deixe a otimização em segundo
   plano do launcher terminar.
+- As builds com clang (o padrão no Windows) já usam um perfil de velocidade (PGO) que vem no repositório e não contém nada
+  do jogo. O **Otimizar agora** do launcher (`-Pgo on` / `--pgo on`) é um extra opcional que treina um perfil completo no seu
+  PC e, nos testes, reduziu em cerca de 20 % a mais o tempo de VU1 e EE por quadro (ele abre o jogo sozinho por 4 minutos).
 - **O perfil de economia de energia do notebook pode cortar a taxa pela metade**, porque reduz o clock da CPU de que a
   thread da VU1 precisa.
 

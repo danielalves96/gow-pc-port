@@ -1707,3 +1707,17 @@ critical = [
 mode = "gow"
 # register_locals = true: guest GPRs in C++ locals (ps2xRuntime/include/ps2_cg.h). Measured 4-6 % slower on the EE with
 # clang (the reloads after every call cost more than the locals save), so it stays off.
+# restrict_ctx and lean_pc (on in "gow"): `R5900Context* __restrict ctx`, and `ctx->pc` stored only where the runtime can
+# read it (emit/lean.rs; device accesses pass their pc to the slow path). With the one-compare guest memory access and the
+# inline call dispatch of the runtime (GOW_FAST_DISPATCH=0 turns that off): EE -18 % at 60 FPS, 97.6 -> 106.7 FPS at the
+# 240 FPS limit on 4 cores (3 alternating pairs of 150 s, scripts/ab-perf.ps1; measured before the project capped every
+# rate at 120 FPS, AGENTS.md).
+# lean_cop2, delay_slot_labels (on in "gow", both under lean_pc): VU0 macro instructions (qmtc2, vmul...) lose their pc store
+# when nothing in them can reach the runtime; a delay slot that is also a branch target gets its own label instead of a
+# test of ctx->pc, so the functions that have one (a fifth of them, the biggest) are lean as well (emit/lean.rs,
+# flow/emitter.rs).
+# ram_groups (on in "gow"): accesses with the same base register in a straight-line run share one RAM range check
+# (GREAD / GWRITE in ps2_runtime_macros.h, emit/ramgroup.rs); the function-level flags start false, so an entry through
+# the switch in the middle of a run uses the plain macros. The run is bit-exact with the per-access check (see the module).
+# vu0_macro_fixes (on in "gow"): VCALLMSR starts at CMSAR0 and VCLIPw sets its flags like the VU1 interpreter (both wrong
+# in PS2Recomp, found by gta-vcs-recomp). God of War's EE code has neither instruction today, so its output is unchanged.

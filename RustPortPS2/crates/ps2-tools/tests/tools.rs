@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ps2_tools::elfcheck::{inspect_bytes, EXPECTED_CRC};
 use ps2_tools::hash::{blake2b_64_hex, fnv};
-use ps2_tools::{iop_gen, iso, vu1, vu1n_gen, xdelta};
+use ps2_tools::{iop_gen, iop_manifest, iso, vu1, vu1n_gen, xdelta};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("ps2-tools-{name}-{}", std::process::id()));
@@ -585,6 +585,163 @@ fn iop_gen_reads_the_overrides_that_ship_with_it() {
     let overrides = iop_gen::parse_overrides(iop_gen::DEFAULT_OVERRIDES);
     assert!(overrides.get("libsd_irx").is_some_and(|offsets| offsets.contains(&0x456c)));
     assert!(iop_gen::parse_overrides("# comment only\n\nbad\n").is_empty());
+}
+
+// ---- iop-manifest -----------------------------------------------------------------------------------------------------
+
+/// A tiny IRX (ET_SCE_IOPRELEXEC) built by hand: one PT_LOAD of 0x20 bytes (+0x20 of bss), the PT_SCE_IOPMOD header with a
+/// text size of 0x20 and a REL section with an R_MIPS_32, an R_MIPS_26 and a HI16/LO16 pair.
+fn synthetic_irx() -> Vec<u8> {
+    fn put32(buffer: &mut Vec<u8>, value: u32) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+    fn put16(buffer: &mut Vec<u8>, value: u16) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+    let mut elf = Vec::new();
+    elf.extend_from_slice(b"\x7fELF\x01\x01\x01");
+    elf.resize(16, 0);
+    for value in [0xFF80u16, 8] {
+        put16(&mut elf, value);
+    }
+    for value in [1u32, 0x10, 52, 0xC0, 0] {
+        put32(&mut elf, value); // version, entry, phoff, shoff, flags
+    }
+    for value in [52u16, 32, 2, 40, 3, 0] {
+        put16(&mut elf, value); // ehsize, phentsize, phnum, shentsize, shnum, shstrndx
+    }
+    // PT_LOAD (file 0x80, vaddr 0) and PT_SCE_IOPMOD (file 0x70).
+    for value in [1u32, 0x80, 0, 0, 0x20, 0x40, 5, 4] {
+        put32(&mut elf, value);
+    }
+    for value in [0x7000_0080u32, 0x70, 0, 0, 16, 16, 4, 4] {
+        put32(&mut elf, value);
+    }
+    elf.resize(0x70, 0);
+    for value in [0u32, 0x10, 0, 0x20] {
+        put32(&mut elf, value); // module info pointer, entry, gp, text size
+    }
+    // Text: a word with an addend, a jal, a lui/addiu pair.
+    for value in [0x100u32, 0x0C00_0010, 0x3C04_0000, 0x2484_0010, 0, 0, 0, 0] {
+        put32(&mut elf, value);
+    }
+    // REL entries at 0xA0: (offset, info) with symbol 0.
+    for (offset, kind) in [(0u32, 2u32), (4, 4), (8, 5), (12, 6)] {
+        put32(&mut elf, offset);
+        put32(&mut elf, kind);
+    }
+    elf.resize(0xC0, 0);
+    // Section headers: null, .text (SHF_ALLOC), .rel.text (SHT_REL, info = 1).
+    let section = |kind: u32, flags: u32, offset: u32, size: u32, info: u32, entsize: u32| {
+        let mut raw = Vec::new();
+        for value in [0u32, kind, flags, 0, offset, size, 0, info, 4, entsize] {
+            put32(&mut raw, value);
+        }
+        raw
+    };
+    elf.extend(section(0, 0, 0, 0, 0, 0));
+    elf.extend(section(1, 2, 0x80, 0x20, 0, 0));
+    elf.extend(section(9, 0, 0xA0, 32, 1, 8));
+    elf
+}
+
+fn synthetic_entry(base: u32) -> iop_manifest::Entry {
+    // The relocated text, computed by hand: addend + base, jal target + base, hi/lo of base + 0x10 with the carry.
+    let mut text = Vec::new();
+    for word in [
+        0x100 + base,
+        0x0C00_0000 | ((0x40 + base) >> 2),
+        0x3C04_0000 | ((base + 0x10 + 0x8000) >> 16),
+        0x2484_0000 | ((base + 0x10) & 0xFFFF),
+        0,
+        0,
+        0,
+        0,
+    ] {
+        text.extend_from_slice(&word.to_le_bytes());
+    }
+    iop_manifest::Entry { file: "TEST.IRX".to_owned(), base, text_size: 0x20, hash: fnv(&text) }
+}
+
+#[test]
+fn an_irx_is_relocated_like_the_iop_loader_does() {
+    let entry = synthetic_entry(0x28000);
+    let text = iop_manifest::module_text(&synthetic_irx(), &entry).unwrap();
+    assert_eq!(text.len(), 0x20);
+    assert_eq!(u32::from_le_bytes(text[0..4].try_into().unwrap()), 0x28100);
+    assert_eq!(u32::from_le_bytes(text[4..8].try_into().unwrap()), 0x0C00_0000 | (0x28040 >> 2));
+    // base + 0x10 = 0x28010: the low half is 0x8010 (negative as a signed LO16), so HI16 carries to 3.
+    assert_eq!(u32::from_le_bytes(text[8..12].try_into().unwrap()) & 0xFFFF, 3);
+    assert_eq!(u32::from_le_bytes(text[12..16].try_into().unwrap()) & 0xFFFF, 0x8010);
+}
+
+#[test]
+fn a_module_that_does_not_match_the_manifest_is_refused() {
+    let irx = synthetic_irx();
+    let mut wrong_hash = synthetic_entry(0x28000);
+    wrong_hash.hash ^= 1;
+    assert!(iop_manifest::module_text(&irx, &wrong_hash).unwrap_err().contains("hash"));
+    // Another base gives other bytes, so the hash of the first base does not fit.
+    let mut other_base = synthetic_entry(0x28000);
+    other_base.base = 0x30000;
+    assert!(iop_manifest::module_text(&irx, &other_base).is_err());
+    let mut wrong_size = synthetic_entry(0x28000);
+    wrong_size.text_size = 0x40;
+    assert!(iop_manifest::module_text(&irx, &wrong_size).unwrap_err().contains("size"));
+    assert!(iop_manifest::module_text(
+        b"not an elf at all, just text that is long enough to read a header from....",
+        &wrong_hash
+    )
+    .is_err());
+}
+
+#[test]
+fn iop_manifest_apply_writes_what_the_runtime_dump_writes() {
+    let directory = scratch("iopman");
+    let (game, output) = (directory.join("game"), directory.join("dump"));
+    fs::create_dir_all(game.join("IOP_MOD")).unwrap();
+    fs::write(game.join("IOP_MOD").join("Test.Irx"), synthetic_irx()).unwrap();
+    let entry = synthetic_entry(0x28000);
+    let manifest = directory.join("iop.manifest");
+    fs::write(
+        &manifest,
+        format!(
+            "# comment\nV 1\nM TEST.IRX {:x} {:x} {:x}\nM MISSING.IRX 30000 20 1\n",
+            entry.base, entry.text_size, entry.hash
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(iop_manifest::apply_manifest(&game, &manifest, &output).unwrap(), 0);
+    // The file name is the runtime's identifier (lowercase, non-alphanumerics as `_`), and the module list its format.
+    let code = fs::read(output.join("test_irx.bin")).unwrap();
+    assert_eq!(fnv(&code), entry.hash);
+    assert_eq!(
+        fs::read_to_string(output.join("modules.txt")).unwrap(),
+        format!("test_irx 28000 20 {:x}\n", entry.hash)
+    );
+    assert!(!output.join("missing_irx.bin").exists());
+    // iop-gen takes the result as its dump.
+    let generated = directory.join("native");
+    iop_gen::run(&output, &generated, "").unwrap();
+    assert!(generated.join("iopn_registry.cpp").is_file());
+    let _ = fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn the_committed_iop_manifest_is_well_formed() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/scus-97399/iop.manifest");
+    let entries = iop_manifest::parse_manifest(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(!entries.is_empty());
+    let mut spans: Vec<(u32, u32)> = entries.iter().map(|e| (e.base, e.base + e.text_size as u32)).collect();
+    spans.sort_unstable();
+    for pair in spans.windows(2) {
+        assert!(pair[0].1 <= pair[1].0, "modules overlap: {pair:x?}");
+    }
+    assert!(spans.iter().all(|&(base, end)| base >= 0x10000 && end < 0x70000), "outside the module arena");
+    assert!(iop_manifest::parse_manifest("M ONLY 1 2\n").is_err());
+    assert!(iop_manifest::parse_manifest("V 2\n").is_err());
+    assert!(iop_manifest::parse_manifest("M A.IRX 1 2 3\nM a.irx 4 5 6\n").is_err());
 }
 
 // ---- vu1n-gen ---------------------------------------------------------------------------------------------------------

@@ -157,11 +157,13 @@ fn is_executable(_path: &str, metadata: &fs::Metadata) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
-pub fn memory_card_directory(elf: &str) -> String {
+/// The memory card image the game saves to: `Mcd001.ps2` next to the ELF (slot 1 of the IOP, as the runtime resolves it
+/// when `GOW_MC0` is not set). The `mc0` folder next to it only holds the few `mc0:` file operations outside the card.
+pub fn memory_card_file(elf: &str) -> String {
     if elf.is_empty() {
         return String::new();
     }
-    Path::new(elf).parent().unwrap_or_else(|| Path::new("")).join("mc0").to_string_lossy().into_owned()
+    Path::new(elf).parent().unwrap_or_else(|| Path::new("")).join("Mcd001.ps2").to_string_lossy().into_owned()
 }
 
 /// Where the texture replacements of an installation live: `<installation>/textures`, next to the `game` folder that
@@ -374,7 +376,7 @@ mod tests {
 
     #[test]
     fn memory_card_sits_next_to_the_elf() {
-        assert!(memory_card_directory("/a/b/SCUS_973.99").replace('\\', "/").ends_with("/a/b/mc0"));
-        assert_eq!(memory_card_directory(""), "");
+        assert!(memory_card_file("/a/b/SCUS_973.99").replace('\\', "/").ends_with("/a/b/Mcd001.ps2"));
+        assert_eq!(memory_card_file(""), "");
     }
 }

@@ -127,6 +127,48 @@ fn call_list_handlers(text: &str) -> Vec<String> {
     names
 }
 
+/// `iop.manifest`: version line, `M FILE BASE SIZE HASH` records, no repeated module, no overlap inside the module arena.
+fn check_iop_manifest(path: &Path, errors: &mut Vec<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        errors.push("iop.manifest: missing or unreadable".to_owned());
+        return;
+    };
+    let mut spans: Vec<(u64, u64, String)> = Vec::new();
+    let mut versioned = false;
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields[0] {
+            "V" if fields.get(1) == Some(&"1") => versioned = true,
+            "M" if fields.len() == 5 => {
+                let hex: Vec<Option<u64>> = fields[2..].iter().map(|f| u64::from_str_radix(f, 16).ok()).collect();
+                if let [Some(base), Some(size), Some(_)] = hex[..] {
+                    let name = fields[1].to_ascii_lowercase();
+                    if spans.iter().any(|s| s.2 == name) {
+                        errors.push(format!("iop.manifest:{}: {} is listed twice", index + 1, fields[1]));
+                    }
+                    spans.push((base, base + size, name));
+                } else {
+                    errors.push(format!("iop.manifest:{}: BASE, SIZE and HASH must be hexadecimal", index + 1));
+                }
+            }
+            _ => errors.push(format!("iop.manifest:{}: unexpected line: {line}", index + 1)),
+        }
+    }
+    if !versioned {
+        errors.push("iop.manifest: missing the `V 1` line".to_owned());
+    }
+    spans.sort();
+    for pair in spans.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            errors.push(format!("iop.manifest: {} overlaps {}", pair[0].2, pair[1].2));
+        }
+    }
+}
+
 pub fn validate_config(args: &[String]) -> i32 {
     let root = find_root(option(args, "--root").as_deref());
     let mut errors: Vec<String> = Vec::new();
@@ -200,6 +242,8 @@ pub fn validate_config(args: &[String]) -> i32 {
             }
         }
     }
+
+    check_iop_manifest(&root.join(GAME_PROFILE).join("iop.manifest"), &mut errors);
 
     for warning in &warnings {
         println!("::warning::{warning}");

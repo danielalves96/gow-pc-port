@@ -78,28 +78,52 @@ if(WIN32 AND NOT MSVC)
     add_link_options(-static)
 endif()
 
-# GOW-Port: clang profile-guided optimization, trained on the player's own machine (decision D3: no profile is shipped).
-# install.ps1 builds with PS2X_PGO=generate, plays the optimization run (which writes the profile when its window closes,
-# ps2_runtime.cpp), merges it and builds again with PS2X_PGO=use. Measured by gow-native-pc on the same game: +4.7 % on
-# average, +13 % in combat. The profile's hash is a compile definition, so a new profile at the same path rebuilds the objects.
-set(PS2X_PGO "" CACHE STRING "clang: profile-guided optimization: generate, use, or empty for none")
+# GOW-Port: clang profile-guided optimization. Two profiles:
+#  - pgo/runtime.profdata, shipped in the repository: made from this repository's own runtime only (the GS, the VU1 core,
+#    the audio, the IOP...; scripts/make-runtime-profile.ps1 filters the recompiled EE functions, the generated VU1 blocks and
+#    the templates instantiated with microcode words out of a full profile), so it holds nothing from the game and the
+#    installation never needs the game to open by itself. Measured: GS thread -24 % at 60 FPS on 4 cores.
+#  - the full profile trained on the player's PC (install.ps1 -Pgo on, the launcher's "Optimize now"): the instrumented
+#    build plays the optimization run, which writes the profile when its window closes (ps2_runtime.cpp); it is merged and
+#    the game is built again with it (PS2X_PGO=use + PS2X_PGO_PROFILE). It also covers the recompiled EE code and the VU1
+#    blocks (VU1 -23 %, EE -20 %, GS -36 % in total).
+# PS2X_PGO: auto (default; clang: the shipped profile), shipped (the same, fails when the file is missing), use (the profile
+# in PS2X_PGO_PROFILE), generate (instrumented build), off or empty (none). GCC and MSVC ignore all of it.
+# The profile's hash is a compile definition, so a new profile at the same path rebuilds the objects. Functions that changed
+# since the profile was made, or that it never saw, are compiled without profile data: no warnings for them.
+set(PS2X_PGO "auto" CACHE STRING "clang: profile-guided optimization: auto, shipped, use, generate, or off")
 set(PS2X_PGO_PROFILE "" CACHE FILEPATH "clang: the merged .profdata for PS2X_PGO=use")
-if(NOT MSVC AND PS2X_PGO STREQUAL "generate")
+set(PS2X_PGO_SHIPPED_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/pgo/runtime.profdata")
+set(_ps2x_pgo_mode "${PS2X_PGO}")
+if(_ps2x_pgo_mode STREQUAL "auto")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND EXISTS "${PS2X_PGO_SHIPPED_PROFILE}")
+        set(_ps2x_pgo_mode "shipped")
+    else()
+        set(_ps2x_pgo_mode "off")
+    endif()
+endif()
+if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(_ps2x_pgo_mode "off")
+endif()
+if(_ps2x_pgo_mode STREQUAL "generate")
     add_compile_options(-fprofile-instr-generate)
     add_link_options(-fprofile-instr-generate)
     add_compile_definitions(PS2X_PGO_GENERATE=1)
     message(STATUS "PGO: instrumented build (training)")
-elseif(NOT MSVC AND PS2X_PGO STREQUAL "use")
-    if(NOT EXISTS "${PS2X_PGO_PROFILE}")
-        message(FATAL_ERROR "PS2X_PGO=use needs PS2X_PGO_PROFILE (not found: ${PS2X_PGO_PROFILE})")
+elseif(_ps2x_pgo_mode STREQUAL "use" OR _ps2x_pgo_mode STREQUAL "shipped")
+    set(_ps2x_pgo_file "${PS2X_PGO_PROFILE}")
+    if(_ps2x_pgo_mode STREQUAL "shipped")
+        set(_ps2x_pgo_file "${PS2X_PGO_SHIPPED_PROFILE}")
     endif()
-    file(SHA256 "${PS2X_PGO_PROFILE}" PS2X_PGO_PROFILE_SHA256)
+    if(NOT EXISTS "${_ps2x_pgo_file}")
+        message(FATAL_ERROR "PS2X_PGO=${_ps2x_pgo_mode} needs a profile (not found: ${_ps2x_pgo_file})")
+    endif()
+    file(SHA256 "${_ps2x_pgo_file}" PS2X_PGO_PROFILE_SHA256)
     string(SUBSTRING "${PS2X_PGO_PROFILE_SHA256}" 0 16 PS2X_PGO_PROFILE_ID)
-    # Functions the training run never reached, or that changed since, are compiled without a profile: no warnings for them.
-    add_compile_options("-fprofile-instr-use=${PS2X_PGO_PROFILE}" -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date
-                        -Wno-backend-plugin)
+    add_compile_options("-fprofile-instr-use=${_ps2x_pgo_file}" -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date
+                        -Wno-profile-instr-missing -Wno-backend-plugin)
     add_compile_definitions(PS2X_PGO_PROFILE_ID=0x${PS2X_PGO_PROFILE_ID})
-    message(STATUS "PGO: using ${PS2X_PGO_PROFILE} (${PS2X_PGO_PROFILE_ID})")
+    message(STATUS "PGO: using ${_ps2x_pgo_file} (${PS2X_PGO_PROFILE_ID})")
 endif()
 
 if(PS2X_BUILD_RUNTIME)

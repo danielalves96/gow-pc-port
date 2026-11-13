@@ -62,6 +62,11 @@ namespace
         // The runtime's internal heap goes below the ELF (free memory) so it doesn't overlap the game's own heap,
         // which it creates with SetupHeap at the end of .bss (patches/ps2recomp-heap.patch).
         runtime.setPrivateGuestHeap(0x000A0000u, 0x000FF000u);
+        // A call through a bad function pointer (NULL or garbage) is skipped and logged ([gow-badcall]) instead of
+        // freezing the game: see PS2Runtime::dispatchGuestBranch. GOW_BAD_CALL_SKIP=0 keeps the former behaviour
+        // (the callers unwind and the main thread goes dormant), to debug the cause.
+        if (const char *skip = std::getenv("GOW_BAD_CALL_SKIP"); !skip || skip[0] != '0')
+            runtime.setMissingFunctionPolicy(PS2Runtime::MissingFunctionPolicy::SkipCallDebug);
         runtime.replaceFunction(0x00279600u, gowIpuInit);
         runtime.replaceFunction(0x0028C0C8u, gowRand);
         runtime.replaceFunction(0x0014C278u, gowOperatorNew);         // object guard (heap_guard)
@@ -69,6 +74,7 @@ namespace
         runtime.replaceFunction(0x00147520u, gowGuardTimelineChannels);
         runtime.replaceFunction(0x0023B6A0u, gowGuardNodeDestructor);
         runtime.replaceFunction(0x00149340u, gowGuardCloneList);
+        runtime.replaceFunction(0x001D6CD0u, gowGuardPlayerUpdate);
         if (std::getenv("GOW_FLASHQ_WATCH"))
         {
             runtime.replaceFunction(0x00146158u, gowFlashQueueDrain);
@@ -78,6 +84,22 @@ namespace
             runtime.replaceFunction(0x00116EF0u, gowDiagController);
         if (std::getenv("GOW_BLEND_DIAG"))
             runtime.replaceFunction(0x00110E40u, gowDiagBlend);
+        // GOW-Port: observers of the original UI (HUD object, message bank, Flash movies); read-only, always call the original.
+        const char *menuDiag = std::getenv("GOW_MENU_DIAG");
+        const char *menuExt = std::getenv("GOW_NATIVE_CHEATS_MENU");
+        if ((menuDiag && std::strcmp(menuDiag, "1") == 0) || (menuExt && std::strcmp(menuExt, "1") == 0))
+        {
+            runtime.replaceFunction(0x001B8A48u, gowDiagMenuMessages);
+            runtime.replaceFunction(0x001B9358u, gowDiagMenuShow);
+            runtime.replaceFunction(0x001B7CE0u, gowDiagMenuMovie);
+            if (menuExt && std::strcmp(menuExt, "1") == 0)
+            {
+                runtime.replaceFunction(0x0014AE68u, gowNativeMenuBuildMovie);
+                gowSetVBlankExtra(gowNativeMenuVBlank);
+            }
+            std::fprintf(stderr, "[gow-menu] observers on; the Options extension is %s\n",
+                         menuExt && std::strcmp(menuExt, "1") == 0 ? "installed (Port Options and Cheats in the pause menu, see docs/dev/NATIVE_MENU_RESEARCH.md)" : "not requested");
+        }
         if (std::getenv("GOW_HEAP_ZERO"))
             runtime.replaceFunction(0x0013DC78u, gowHeapZeroAlloc);
         if (std::getenv("GOW_SKEL_DIAG") || std::getenv("GOW_SKEL_OBJECT") || std::getenv("GOW_SKEL_ANIM"))
@@ -101,6 +123,9 @@ namespace
             runtime.replaceFunction(0x00188B80u, gowMovieStreamService);
             runtime.replaceFunction(0x0018A788u, gowMovieVideoRingWrite);
             runtime.replaceFunction(0x0018AAA8u, gowMovieNodata);
+            runtime.replaceFunction(0x00188848u, gowMovieStreamRead); // end of a movie's file (GOW_MOVIE_EOF=0 undoes it)
+            runtime.replaceFunction(0x00189B00u, gowMovieCompletion);
+            runtime.replaceFunction(0x00189A88u, gowMovieTailAudio);
             if (std::getenv("GOW_MOVIE_OVERRIDE") || std::getenv("GOW_MPEG_DIAG"))
                 runtime.replaceFunction(0x00188CA0u, gowMovieOverrideLoad);
             if (std::getenv("GOW_BONUS_MOVIE") || movieOverrideCount() > 1)
@@ -110,14 +135,26 @@ namespace
             if (std::getenv("GOW_MPEG_DIAG"))
                 runtime.replaceFunction(0x0017AFE0u, gowDiagStreamRead);
         }
+        runtime.replaceFunction(0x0022E800u, gowSaveWriteFile); // observes the end of a save (backup, notice)
+        if (const char *load = std::getenv("GOW_SAVE_LOAD"); !load || load[0] != '0')
+        {
+            // loading a slot from the launcher or the F2 menu: gameplay and pause frames can hand over to the main menu, which then picks Load
+            runtime.replaceFunction(0x0021F3C8u, gowSaveLoadGameplay);
+            runtime.replaceFunction(0x0021F638u, gowSaveLoadPause);
+            runtime.replaceFunction(0x0021EBF8u, gowSaveLoadMainMenu);
+        }
         if (const char *diag = std::getenv("GOW_LOADER_DIAG"); diag && std::strcmp(diag, "1") == 0)
             gowLoaderDiagInstall(runtime);
         // game logic rate (gow_logic_rate.cpp): PC_LOGIC_FPS > 60 paces the frame at N Hz, off by default
-        const int logicFps = gowLogicFps();
+        // bound whenever the menus can change the FPS limit (GOW_NATIVE_CHEATS_MENU=1), not only when the game starts above 60: the
+        // wrappers run the original when the limit is 60
+        const char *frameMenu = std::getenv("GOW_NATIVE_CHEATS_MENU");
+        const bool frameMenuOn = frameMenu && std::strcmp(frameMenu, "1") == 0;
+        const int logicFps = frameMenuOn ? std::max(gowLogicFps(), 120) : gowLogicFps();
         if (logicFps > 60)
         {
             runtime.replaceFunction(0x0017A1D0u, gowLogicFrameWait); // frame end's VBlank wait
-            std::fprintf(stderr, "[gow-hfps] game logic at %d Hz (experimental, PC_LOGIC_FPS)\n", logicFps);
+            std::fprintf(stderr, "[gow-hfps] game logic at %d Hz (experimental, PC_LOGIC_FPS)\n", gowLogicFps());
         }
         if (const char *diag = std::getenv("GOW_HFPS_DIAG"); logicFps > 60 || (diag && std::strcmp(diag, "1") == 0))
             runtime.replaceFunction(0x0017D778u, gowLogicTimeStep); // per-frame time step

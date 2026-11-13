@@ -20,7 +20,7 @@ export function FilesPage() {
   const { settings, patch, status, detectPaths, openWizard, api, t, f } = useApp();
   const [memoryCard, setMemoryCard] = useState('');
   useEffect(() => {
-    void api.memoryCardDirectory(settings.elf).then(setMemoryCard);
+    void api.memoryCardFile(settings.elf).then(setMemoryCard);
   }, [api, settings.elf]);
 
   const game = status?.game;
@@ -76,7 +76,7 @@ export function FilesPage() {
       </Field>
       {settings.elf.length > 0 && (
         <Field icon={Save} title={t('memory')} description={t('memoryDesc')}>
-          <PathField path={memoryCard} folderOnly />
+          <PathField path={memoryCard} folderOnly openTarget={memoryCard.replace(/[\\/][^\\/]*$/, '')} />
         </Field>
       )}
       <div className="mt-1 flex gap-2.5 pl-9">

@@ -62,6 +62,18 @@ call lists against the committed files; `ps2-dev validate-config` runs the same 
 from `RustPortPS2/` (never `cargo fmt --all`: it rewrites the vendored Rabbitizer). Its byte-identical gate runs on a
 synthetic fixture in CI and on the retail ELF locally (`RustPortPS2/docs/PARITY.md`).
 
+## Frame-rate cap: 120 FPS at most (non-negotiable)
+
+- The goal is a steady 60 FPS without stutter on any PC, the weakest included. Nothing in the project runs the game or its
+  window above **120 FPS**: the runtime (`kMaxFps` in `ps2xRuntime/src/lib/gow_frame.h`: `PC_LOGIC_FPS` and
+  `PC_WINDOW_FPS` are capped there, and `PC_WINDOW_FPS=0` no longer means unlimited), the launcher (`MAX_FPS` in
+  `gow-launcher/crates/gow-core/src/launch.rs`: limits 60 and 120; the window at 60 with the 60 limit, at the display's rate up to 120 with the 120 one), the
+  in-game Frame Rate page (60 / 120) and every test or measurement.
+- No "uncapped" tests either: `scripts/ab-perf.ps1` refuses `PC_LOGIC_FPS` above 120 and `PC_WINDOW_FPS` of 0 or above 120.
+  Uncapped runs kept the GPU at 100 % until the AMD OpenGL driver crashed (`atio6axx.dll`) and measure nothing a player
+  sees. Compare builds at 60 FPS with the launcher's real environment (`-Cores 4` for a weak PC), by the per-thread time
+  per frame (`[gow-perf]`), the frames over 16.7 ms and the hitches (`GOW_FRAMES_HITCH_LOG=1`).
+
 ## Rules for living with the user's game (non-negotiable)
 
 - **Never** close processes by name (`Get-Process gow-2005 | Stop-Process`): doing so has already killed the user's
@@ -88,7 +100,7 @@ or audio:
   count above 0, and `GOW_PERF_DIAG=1` must report a low `vu_ms`.
 - **Always measure with the launcher's real environment**, not an invented one: `gow-launcher/crates/gow-core/src/launch.rs`
   (`BASE_ENVIRONMENT`: `PS2X_GS_WORKER=1`, `GOW_GS_FINISH_ASYNC=1`, `GOW_AUDIO_DEVICE=default`, `GOW_PERF_DIAG=1`,
-  `GOW_PERF_FRAME_PC`) plus the user's settings (`settings.json` in `%APPDATA%\GOW_PC\Launcher`: internal
+  `GOW_PERF_FRAME_PC`, `GOW_NATIVE_CHEATS_MENU=1`) plus the user's settings (`settings.json` in `%APPDATA%\GOW_PC\Launcher`: internal
   scale, FXAA, filter, resolution). `cargo run -p gow-cli -- env` from `gow-launcher/` prints it. Without
   `PS2X_GS_WORKER=1` the GS runs inline with the EE, which causes audio dropouts and slowdowns that players never see.
   Confirm in the log that `[gs-worker] VIF1/GIF processing on a worker thread` appears, and check the `exepath` of the

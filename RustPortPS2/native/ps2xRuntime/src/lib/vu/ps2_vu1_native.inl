@@ -12,12 +12,48 @@ namespace
         uint32_t pairs;
         const VU1TailDesc *tail;
         bool readsEntryFlags; // reads MAC/clip flags written before the block (ps2-tools vu1n-gen: bit 16 of pairs)
+        VU1NativeLoopFn loop; // loop-folded variant (self-looping blocks), or null
         std::vector<uint8_t> cyc; // issue cycle of each pair (block entry = 0), filled on first use
     };
     std::unordered_map<uint64_t, NativeEntry> &nativeRegistry()
     {
         static std::unordered_map<uint64_t, NativeEntry> registry;
         return registry;
+    }
+    // GOW-Port: vu1n::blockKey is a byte-wise FNV-1a, a serial chain of 4 multiplications per word (up to 128 words, ~2000
+    // cycles) that every slot setup paid. The game swaps microprograms back and forth, so the same pair sequences come again:
+    // remember the registry key of the sequences seen, found by a fast 64-bit hash and confirmed by comparing all the words
+    // (a collision only replaces the entry), so the key is always the one blockKey would compute.
+    uint64_t cachedBlockKey(const uint32_t *words, uint32_t count)
+    {
+        struct Entry
+        {
+            uint32_t count;
+            uint64_t key;
+            uint32_t words[136]; // 65 pairs at most (64 + a delay slot)
+        };
+        static thread_local std::unordered_map<uint64_t, Entry> cache;
+        uint64_t h = 0x9E3779B97F4A7C15ull ^ count;
+        for (uint32_t i = 0; i + 1u < count; i += 2u)
+        {
+            uint64_t v;
+            std::memcpy(&v, words + i, 8);
+            h = (h ^ v) * 0xFF51AFD7ED558CCDull;
+            h ^= h >> 32;
+        }
+        if (count & 1u)
+            h = (h ^ words[count - 1u]) * 0xFF51AFD7ED558CCDull, h ^= h >> 32;
+        const auto it = cache.find(h);
+        if (it != cache.end() && it->second.count == count && std::memcmp(it->second.words, words, count * 4u) == 0)
+            return it->second.key;
+        const uint64_t key = vu1n::blockKey(words, count);
+        if (cache.size() >= 16384u)
+            cache.clear();
+        Entry &e = cache[h];
+        e.count = count;
+        e.key = key;
+        std::memcpy(e.words, words, count * 4u);
+        return key;
     }
     bool isBranchLower(uint32_t lower)
     {
@@ -68,9 +104,9 @@ namespace
     }
 }
 
-void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail)
+void vu1nRegisterBlock(uint64_t key, VU1NativeFn fn, uint32_t pairs, const VU1TailDesc *tail, VU1NativeLoopFn loop)
 {
-    nativeRegistry()[key] = {fn, pairs & 0xFFFFu, tail, (pairs & 0x10000u) != 0u, {}};
+    nativeRegistry()[key] = {fn, pairs & 0xFFFFu, tail, (pairs & 0x10000u) != 0u, loop, {}};
 }
 
 // Issue cycles of the pairs of a block as the exact engine would see them (operand/pipeline stalls included), assuming
@@ -293,6 +329,15 @@ void VU1NativeAccess::exportFlags(VU1Interpreter &vu)
 // same value), but their timing state stays: the flag queue, and FDIV/EFU marked busy until their ready cycle.
 void VU1NativeAccess::commitValuesKeepTiming(VU1Interpreter &vu)
 {
+    // GOW-Port: nothing but flags in flight (the usual state at a callout): the general path below would commit nothing, since it
+    // hides the flag queue from commitEverythingNow and restores it, and would leave the pipelines empty and the next commit
+    // cycle at "never" (commitReadyPipelines' flags-only branch). That is all the state it changes, so set it directly.
+    if ((vu.m_storePending | vu.m_vfPending | vu.m_viPending | vu.m_accPending) == 0u && !vu.m_fdiv.valid &&
+        !vu.m_efu[0].valid && !vu.m_efu[1].valid)
+    {
+        vu.m_nextCommitCycle = ~0ull;
+        return;
+    }
     const uint32_t flagHead = vu.m_flagHead, flagCount = vu.m_flagCount;
     const VU1Interpreter::ScalarPipelineEntry fdiv = vu.m_fdiv;
     const auto efu = vu.m_efu;
@@ -614,13 +659,14 @@ void VU1NativeAccess::scalarStart(VU1Interpreter &vu, uint64_t issue, uint32_t l
 
 // After a native block: it joins the history (its results that outlive it are found there when needed); FDIV/EFU stay
 // busy until their ready cycle.
+template <bool Idle> // Idle: cyc is the slot's idle table (cycId 0), known by the caller
 VU1N_INLINE void VU1NativeAccess::finishBlockTiming(VU1Interpreter &vu, const VU1Interpreter::NativeState::Slot &sl, const uint8_t *cyc,
                                                      uint32_t cycId, uint64_t start)
 {
     using NS = VU1Interpreter::NativeState;
     NS &ns = *vu.m_native;
     // the idle table's length is in the slot: most blocks never touch their table's cache line here
-    const uint64_t end = start + (cyc == sl.idle ? sl.idleEnd : cyc[sl.pairs - 1u] + 1u);
+    const uint64_t end = start + (Idle || cyc == sl.idle ? sl.idleEnd : cyc[sl.pairs - 1u] + 1u);
     NS::Hist &h = ns.hist[ns.histNext];
     h.bt = sl.bt;
     h.cyc = cyc;
@@ -644,6 +690,104 @@ VU1N_INLINE void VU1NativeAccess::finishBlockTiming(VU1Interpreter &vu, const VU
         const VU1Interpreter::DecodedInstructionPair &d = bt.dec[i];
         scalarStart(vu, start + cyc[i], d.lowerUsage.latency, d.lowerUsage.pipeline == VU1Interpreter::PipelineFdiv);
     }
+}
+
+// GOW-Port: the FDIV / EFU retire that follows a native block once m_cycle reaches m_nextCommitCycle, with nothing else in
+// flight (no pending pipeline writes or flags: callouts commit their values and import their flags, see runNative).
+VU1N_INLINE void VU1NativeAccess::retireScalars(VU1Interpreter &vu)
+{
+    uint64_t next = ~0ull;
+    if (vu.m_fdiv.valid)
+    {
+        if (vu.m_fdiv.readyCycle <= vu.m_cycle)
+        {
+            vu.m_state.q = vu.m_fdiv.value;
+            const uint32_t currentDi = vu.m_fdiv.statusDi & 0x30u;
+            vu.m_state.status = (vu.m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
+            vu.m_fdiv.valid = false;
+        }
+        else
+            next = vu.m_fdiv.readyCycle;
+    }
+    for (VU1Interpreter::ScalarPipelineEntry &e : vu.m_efu)
+        if (e.valid)
+        {
+            if (e.readyCycle <= vu.m_cycle)
+            {
+                vu.m_state.p = e.value;
+                e.valid = false;
+            }
+            else
+                next = std::min(next, e.readyCycle);
+        }
+    vu.m_nextCommitCycle = next;
+}
+
+// GOW-Port: what runNative does around each of `iters` back-to-back runs of a folded block (VU1NativeLoopFn), starting at
+// cycle `start`, as if each had been dispatched on the idle table: finishBlockTiming<true> (history entry, m_cycle = end,
+// scalarStart of its FDIV operations) and the retire test, in that order, iteration by iteration.
+//  - History: only the entries that are still in the ring afterwards (the last kHist) are written, in the slots the iterations
+//    would have used (the loop function wrote their tail records there); histNext and histCount advance by `iters`.
+//  - Scalar timing: replayed iteration by iteration (it depends on the previous iteration only through m_fdiv, m_efu,
+//    m_nextCommitCycle and the status word). The transition is a function of that state relative to the iteration's end cycle, so
+//    once two consecutive iterations leave the same relative state (and no EFU entry is in flight) every later one does too: the
+//    final state is that state shifted to the last iteration's end. A scalarStart records the current Q as the FDIV's value; the
+//    loop's Q at each iteration end differs from the final one, but a retire writes back that same Q (nothing changes it between
+//    the block's FDIV and the retire), so the final Q is the same either way.
+void VU1NativeAccess::foldIterations(VU1Interpreter &vu, const VU1Interpreter::NativeState::Slot &sl, uint64_t start, uint32_t iters)
+{
+    using NS = VU1Interpreter::NativeState;
+    NS &ns = *vu.m_native;
+    const uint64_t len = sl.idleEnd;
+    for (uint32_t i = iters > NS::kHist ? iters - NS::kHist : 0u; i < iters; ++i)
+    {
+        NS::Hist &h = ns.hist[(ns.histNext + i) % NS::kHist];
+        h.bt = sl.bt;
+        h.cyc = sl.idle;
+        h.start = start + i * len;
+        h.end = h.start + len;
+        h.cycId = 0u;
+    }
+    ns.histNext = (ns.histNext + iters) % NS::kHist;
+    ns.histCount += iters;
+
+    struct Rel
+    {
+        bool valid;
+        uint64_t ready, next;
+        uint32_t status, di;
+        bool operator==(const Rel &o) const
+        {
+            return valid == o.valid && ready == o.ready && next == o.next && status == o.status && di == o.di;
+        }
+    };
+    const uint64_t last = start + iters * len;
+    Rel prev{};
+    for (uint32_t i = 0; i < iters; ++i)
+    {
+        const uint64_t s = start + i * len, e = s + len;
+        vu.m_cycle = e;
+        for (uint32_t k = 0; k < sl.scalarCount; ++k)
+            scalarStart(vu, s + sl.idle[sl.scalar[k].pair], sl.scalar[k].latency, true);
+        if (e >= vu.m_nextCommitCycle)
+            retireScalars(vu);
+        bool efuBusy = false;
+        for (const VU1Interpreter::ScalarPipelineEntry &x : vu.m_efu)
+            efuBusy = efuBusy || x.valid;
+        const Rel cur{vu.m_fdiv.valid, vu.m_fdiv.valid ? vu.m_fdiv.readyCycle - e : 0u,
+                      vu.m_nextCommitCycle == ~0ull ? ~0ull : vu.m_nextCommitCycle - e, vu.m_state.status,
+                      vu.m_fdiv.valid ? vu.m_fdiv.statusDi : 0u};
+        if (i != 0u && !efuBusy && cur == prev)
+        {
+            if (cur.valid)
+                vu.m_fdiv.readyCycle = cur.ready + last;
+            if (cur.next != ~0ull)
+                vu.m_nextCommitCycle = cur.next + last;
+            break;
+        }
+        prev = cur;
+    }
+    vu.m_cycle = last;
 }
 
 // The micro memory has a new generation (VIF MPG, EE writes): slots whose extent scan read a changed pair are set up again
@@ -671,19 +815,32 @@ void VU1NativeAccess::codeChanged(VU1Interpreter::NativeState &ns, const uint8_t
     for (uint32_t i = 0; i < kPairs; ++i)
     {
         changedBefore[i] = static_cast<uint16_t>(changed);
-        changed += std::memcmp(ns.code + i * 8u, code + i * 8u, 8u) != 0;
+        uint64_t a, b;
+        std::memcpy(&a, ns.code + i * 8u, 8u);
+        std::memcpy(&b, code + i * 8u, 8u);
+        changed += a != b;
     }
     changedBefore[kPairs] = static_cast<uint16_t>(changed);
     if (changed == 0u)
         return;
+    // GOW-Port: a slot's scan covers at most 65 pairs (64 + the pair that ends it), so only the slots up to 64 pairs before a
+    // changed pair can see it: those are the only ones tested (the 2048 slots are 256 KB; the game swaps one microprogram
+    // ~13 times per frame and walking them all each time was most of this function).
+    uint32_t next = 0; // first slot not tested yet
     for (uint32_t i = 0; i < kPairs; ++i)
     {
-        NS::Slot &sl = ns.slots[i];
-        if (!sl.known)
-            continue;
-        const uint32_t end = std::min<uint32_t>(kPairs, i + sl.pairs + 1u); // the pair after the block ends the scan
-        if (changedBefore[end] != changedBefore[i])
-            sl.known = false;
+        if (changedBefore[i + 1u] == changedBefore[i])
+            continue; // pair i did not change
+        for (uint32_t j = std::max(next, i >= 64u ? i - 64u : 0u); j <= i; ++j)
+        {
+            NS::Slot &sl = ns.slots[j];
+            if (!sl.known)
+                continue;
+            const uint32_t end = std::min<uint32_t>(kPairs, j + sl.pairs + 1u); // the pair after the block ends the scan
+            if (changedBefore[end] != changedBefore[j])
+                sl.known = false;
+        }
+        next = i + 1u;
     }
     std::memcpy(ns.code, code, sizeof(ns.code));
 }
@@ -703,7 +860,7 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu, 
         sl.pairs = static_cast<uint16_t>(count);
         if (count != 0u)
         {
-            const auto it = nativeRegistry().find(vu1n::blockKey(words, count * 2u));
+            const auto it = nativeRegistry().find(cachedBlockKey(words, count * 2u));
             if (it != nativeRegistry().end())
             {
                 if (it->second.cyc.empty())
@@ -725,6 +882,18 @@ VU1Interpreter::NativeState::Slot &VU1NativeAccess::slotFor(VU1Interpreter &vu, 
                     for (const uint8_t i : bt.scalarPairs)
                         sl.scalar[sl.scalarCount++] = {i, static_cast<uint8_t>(bt.dec[i].lowerUsage.latency),
                                                        bt.dec[i].lowerUsage.pipeline == VU1Interpreter::PipelineFdiv};
+                // GOW-Port: loop folding needs the block to start at least one FDIV (its scalarStart overwrites whatever
+                // was in flight, which foldIterations relies on) and nothing but FDIVs (EFU results are queued by callouts,
+                // which the generator never folds; the check is belt and braces).
+                if (it->second.loop && !bt.readsEntryFlags && sl.scalarCount >= 1u &&
+                    sl.scalarCount != VU1Interpreter::NativeState::kScalarMany)
+                {
+                    bool onlyFdiv = true;
+                    for (uint32_t k = 0; k < sl.scalarCount; ++k)
+                        onlyFdiv = onlyFdiv && sl.scalar[k].fdiv;
+                    if (onlyFdiv)
+                        sl.loopFn = it->second.loop;
+                }
             }
             else if (ns.diag)
                 ++ns.missPcs[pc];
@@ -846,30 +1015,125 @@ bool VU1Interpreter::runNative(StepContext &context)
             ++ns.count;
             ns.trace.push_back(pc);
         }
-        const uint64_t start = m_cycle;
         // Values never depend on timing, only flag reads do. A block that reads flags written before it gets its exact
         // issue cycles from the pipeline state at entry (the stalls decide which of those flags it sees); the others use
         // their idle-pipeline table and only hand their results and flags in flight on.
         uint32_t cycId = 0u;
         const uint8_t *cyc = sl.readsEntryFlags ? VU1NativeAccess::blockTiming(*this, sl, cycId) : sl.idle;
         ctx.cyc = cyc;
-        ctx.start = start;
         ctx.pc = pc; // GOW-Port: position independent blocks add their offsets to it
-        if (sl.tail)
+        // GOW-Port: blocks that do not read entry flags run on idle timing tables (cycId 0) and, with no verify bookkeeping
+        // (limit off), the next block can be entered without the armed / limit tests and the timing-table choice: a block
+        // that loops to its own start (the vertex loops are most of the VU1 time) or goes to another block that is already set
+        // up (the two-block vertex kernels) is dispatched right here. Everything per block that defines the result (start
+        // cycle, history entry, tail record, scalar timing, retire, stop / budget test, pc store) is the same as at the top
+        // of the loop and runs in the same order; the next block is entered here only when the top of the loop would take
+        // the same path for it (pc in range, slot known, native block present, no entry-flag reads).
+        const bool repeat = !sl.readsEntryFlags && ns.limit == ~0u;
+        uint64_t pairsRun = 0u, blocksRun = 0u;
+        const NativeState::Slot *cs = &sl;
+        VU1NativeFn curFn = fn;
+        uint32_t curPc = pc;
+        uint32_t result;
+        for (;;)
         {
-            VU1FlagTail &t = ns.hist[ns.histNext].tail;
-            t.desc = sl.tail;
-            t.cyc = cyc;
-            t.start = start;
-            ctx.tail = &t;
+            uint32_t iterations = 1u;
+            // GOW-Port: loop folding. A block that branches back to its own start (the vertex loops) runs all the iterations the
+            // cycle budget allows in one call; foldIterations then does for all of them what the code below does for one. Only
+            // with nothing pending from the exact engine (the retire below would then run commitReadyPipelines).
+            if (repeat && cs->loopFn && ((m_storePending | m_vfPending | m_viPending | m_accPending) | m_flagCount) == 0u)
+            {
+                const uint64_t start = m_cycle;
+                const uint64_t length = cs->idleEnd;
+                ctx.start = start;
+                ctx.loopLen = cs->idleEnd;
+                ctx.tailDesc = cs->tail;
+                // Iteration i starts at start + i * length and runs only while that is below the budget (m_cycle < budgetEnd here).
+                const uint64_t room = (context.budgetEnd - start + length - 1u) / length;
+                const uint64_t packed = cs->loopFn(ctx, static_cast<uint32_t>(std::min<uint64_t>(room, 0xFFFFu)));
+                iterations = static_cast<uint32_t>(packed >> 32);
+                result = static_cast<uint32_t>(packed);
+                VU1NativeAccess::foldIterations(*this, *cs, start, iterations);
+            }
+            else
+            {
+                const uint64_t start = m_cycle;
+                ctx.start = start;
+                if (cs->tail)
+                {
+                    VU1FlagTail &t = ns.hist[ns.histNext].tail;
+                    t.desc = cs->tail;
+                    t.cyc = cyc;
+                    t.start = start;
+                    ctx.tail = &t;
+                }
+                result = curFn(ctx);
+                if (repeat)
+                    VU1NativeAccess::finishBlockTiming<true>(*this, *cs, cyc, cycId, start);
+                else
+                    VU1NativeAccess::finishBlockTiming<false>(*this, *cs, cyc, cycId, start);
+                if (m_cycle >= m_nextCommitCycle)
+                {
+                    // FDIV/EFU entries kept for timing retire when ready (values are written already). GOW-Port: inside the native
+                    // loop nothing else is pending (callouts commit their values, their flags join the rings), so the FDIV/EFU
+                    // part of commitReadyPipelines runs here inline: same results, without the call and its empty queue walks.
+                    if (((m_storePending | m_vfPending | m_viPending | m_accPending) | m_flagCount) != 0u)
+                        commitReadyPipelines();
+                    else
+                    {
+                        uint64_t next = ~0ull;
+                        if (m_fdiv.valid)
+                        {
+                            if (m_fdiv.readyCycle <= m_cycle)
+                            {
+                                m_state.q = m_fdiv.value;
+                                const uint32_t currentDi = m_fdiv.statusDi & 0x30u;
+                                m_state.status = (m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
+                                m_fdiv.valid = false;
+                            }
+                            else
+                                next = m_fdiv.readyCycle;
+                        }
+                        for (ScalarPipelineEntry &e : m_efu)
+                            if (e.valid)
+                            {
+                                if (e.readyCycle <= m_cycle)
+                                {
+                                    m_state.p = e.value;
+                                    e.valid = false;
+                                }
+                                else
+                                    next = std::min(next, e.readyCycle);
+                            }
+                        m_nextCommitCycle = next;
+                    }
+                }
+            }
+            pairsRun += static_cast<uint64_t>(cs->pairs) * iterations;
+            blocksRun += iterations;
+            m_state.pc = result & 0x3FFFu;
+            if (!repeat || (result & (kVu1nEnded | kVu1nBail)) != 0u || m_stopRequested || m_cycle >= context.budgetEnd)
+                break;
+            const uint32_t nextPc = result & 0x3FF8u;
+            if (nextPc != curPc)
+            {
+                if ((result & 0x3FFFu) != nextPc || nextPc + 8u > context.codeSize)
+                    break;
+                const NativeState::Slot &next = ns.slots[nextPc >> 3];
+                if (!next.known || !next.fn || next.readsEntryFlags)
+                    break;
+                cs = &next;
+                curFn = next.fn;
+                curPc = nextPc;
+                cyc = next.idle;
+                ctx.cyc = cyc;
+                ctx.pc = nextPc;
+            }
+            else if ((result & 0x3FFFu) != nextPc)
+                break;
         }
-        const uint32_t result = fn(ctx);
-        VU1NativeAccess::finishBlockTiming(*this, sl, cyc, cycId, start);
-        if (m_cycle >= m_nextCommitCycle)
-            commitReadyPipelines(); // FDIV/EFU entries kept for timing retire when ready (values are written already)
-        ns.nativePairs += sl.pairs;
-        ++ns.nativeBlocks;
-        m_state.pc = result & 0x3FFFu;
+        ns.nativePairs += pairsRun;
+        ns.nativeBlocks += blocksRun;
         if (result & kVu1nEnded)
         {
             context.programEnded = true;
@@ -1011,7 +1275,7 @@ void VU1NativeAccess::recordReplay(VU1Interpreter &vu, void *contextPtr, uint32_
         auto rec = std::make_unique<Vu1nRecord>();
         VU1Interpreter saved(vu);
         unsigned total = 0, differ = 0;
-        // GOW_VU1N_REPLAY_HASHES=<file>: saves the hash of each record in this build (8 bytes per record) to compare two
+        // GOW_VU1N_REPLAY_HASHES=<file>: saves the hash of each record in this build (8 bytes per record, final cycle count included) to compare two
         // builds bit by bit (compiler, options like /arch:AVX2, generator), including the records that already differ from the recording.
         static const char *hashesOut = std::getenv("GOW_VU1N_REPLAY_HASHES");
         std::vector<uint64_t> hashes;
@@ -1047,8 +1311,10 @@ void VU1NativeAccess::recordReplay(VU1Interpreter &vu, void *contextPtr, uint32_
                 }
                 else
                 {
+                    // GOW-Port: the saved hashes also cover the VU1 cycle count at the end of the record (the recorded hash
+                    // does not), so two builds can be compared for cycle-exact timing, not only for the same values.
                     if (hashesOut)
-                        hashes.push_back(h);
+                        hashes.push_back(fnvBytes(h, &vu.m_cycle, sizeof(vu.m_cycle)));
                     if (h != rec->hash && differ++ < 20u)
                         std::fprintf(stderr, "[vu1n-replay] record %u startPc=%x differs\n", total, rec->state.pc);
                 }

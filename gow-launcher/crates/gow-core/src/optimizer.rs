@@ -47,7 +47,8 @@ pub struct OptimizerSnapshot {
     pub status: OptimizerStatus,
     /// The run in progress is the speed-profile optimization ("Optimize now": the game opens by itself, see [`Optimizer::profile_now`]).
     pub profiling: bool,
-    /// The installation has a speed profile (PGO), so its builds use it.
+    /// The installation has the full speed profile trained on this PC ("Optimize now"), so its builds use it. Every clang
+    /// build already uses the runtime-only profile shipped with the kit; this one comes on top and replaces it.
     pub profile_ready: bool,
     /// This installation can have one: Windows, built with clang.
     pub profile_supported: bool,
@@ -92,7 +93,9 @@ pub fn profile_stage_after(current: ProfileStage, line: &str) -> ProfileStage {
     }
 }
 
-/// GOW-Port: the speed profile (clang PGO) of an installation, trained on this PC by install.ps1 -Pgo on and never shipped.
+/// GOW-Port: the full speed profile (clang PGO) of an installation, trained on this PC by install.ps1 -Pgo on and never
+/// shipped. Without it the builds use the runtime-only profile of the kit (`RustPortPS2/native/pgo/runtime.profdata`, which
+/// holds nothing from the game); with it they use this one instead.
 pub fn profile_path(destination: &Path) -> PathBuf {
     destination.join("build").join("pgo").join("gow.profdata")
 }
@@ -163,14 +166,51 @@ pub fn profile_arguments(destination: &str, windows: bool) -> Option<Vec<String>
 }
 
 /// How many microprograms are recorded in `<destination>/vu1_captures`.
+/// How many microprograms `destination/vu1_captures` holds.
+///
+/// A long-played installation holds hundreds of thousands of them, and this runs at start-up and every
+/// [`CHECK_INTERVAL`]. The count is kept per folder with the folder's modification time, which changes whenever a file is
+/// added, removed or renamed in it, so an unchanged folder costs one `stat`. The time is read before the listing, so a
+/// capture written during the listing makes the next call list again instead of being missed. A recount uses the type the
+/// listing already returns: asking the file system about each entry (`path().is_file()`) took about 22 s for 414,000 of
+/// them on Windows, against 0.4 s for the listing itself.
 pub fn count_captures(destination: &Path) -> u32 {
-    fs::read_dir(destination.join("vu1_captures"))
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    use std::time::SystemTime;
+
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, u32)>>> = OnceLock::new();
+    let folder = destination.join("vu1_captures");
+    let modified = fs::metadata(&folder).and_then(|metadata| metadata.modified()).ok();
+    let counts = COUNTS.get_or_init(Mutex::default);
+    if let Some(modified) = modified {
+        if let Some(&(when, count)) = counts.lock().unwrap().get(&folder) {
+            if when == modified {
+                return count;
+            }
+        }
+    }
+    let count = list_captures(&folder);
+    match modified {
+        Some(modified) => counts.lock().unwrap().insert(folder, (modified, count)),
+        None => counts.lock().unwrap().remove(&folder),
+    };
+    count
+}
+
+fn list_captures(folder: &Path) -> u32 {
+    let is_capture = |name: &[u8]| {
+        name.len() >= 8
+            && name[..4].eq_ignore_ascii_case(b"vu1_")
+            && name[name.len() - 4..].eq_ignore_ascii_case(b".bin")
+    };
+    fs::read_dir(folder)
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
                 .filter(|entry| {
-                    let name = entry.file_name().to_string_lossy().to_lowercase();
-                    name.starts_with("vu1_") && name.ends_with(".bin") && entry.path().is_file()
+                    is_capture(entry.file_name().as_encoded_bytes())
+                        && entry.file_type().is_ok_and(|kind| kind.is_file())
                 })
                 .count() as u32
         })
@@ -390,8 +430,11 @@ impl Optimizer {
 
     /// An empty destination or `enabled = false` turns everything off. `compiled`: how many microprograms the last
     /// rebuild included.
+    ///
+    /// The captures are counted on another thread, without the lock: at start-up this runs before the window exists, and a
+    /// folder that was never counted can take a while (see [`count_captures`]). The count arrives as a notification.
     pub fn configure(&self, destination: &str, enabled: bool, during_game: bool, compiled: u32) {
-        {
+        let destination = {
             let mut state = self.state.lock().unwrap();
             state.destination = (!destination.trim().is_empty()).then(|| PathBuf::from(destination.trim()));
             state.enabled = enabled && state.destination.is_some();
@@ -399,12 +442,30 @@ impl Optimizer {
             if state.run.is_none() {
                 state.compiled = compiled;
             }
-            state.captured = state.destination.as_deref().map_or(0, count_captures);
             if let Some(directory) = state.destination.as_ref().filter(|_| state.enabled) {
                 let _ = fs::create_dir_all(directory.join("vu1_captures"));
             }
-        }
+            if state.destination.is_none() {
+                state.captured = 0;
+            }
+            state.destination.clone()
+        };
         self.changed();
+        if let Some(destination) = destination {
+            let optimizer = self.clone();
+            std::thread::spawn(move || {
+                let captured = count_captures(&destination);
+                {
+                    let mut state = optimizer.state.lock().unwrap();
+                    // The installation changed meanwhile: its own count is on its way.
+                    if state.destination.as_deref() != Some(destination.as_path()) {
+                        return;
+                    }
+                    state.captured = captured;
+                }
+                optimizer.changed();
+            });
+        }
     }
 
     /// Folder where the game records the new microprograms; empty if the optimizer is off.
@@ -560,8 +621,16 @@ impl Optimizer {
 
     /// One tick of the 30-second timer.
     pub fn check(&self) {
+        // Counted before taking the lock: a folder that changed is listed again, and nothing else should wait for that.
+        let destination = self.state.lock().unwrap().destination.clone();
+        let counted =
+            destination.as_deref().map(|destination| (destination.to_path_buf(), count_captures(destination)));
         let start = {
             let mut state = self.state.lock().unwrap();
+            let captured = match (&counted, state.destination.as_deref()) {
+                (Some((counted_for, count)), Some(current)) if counted_for == current => *count,
+                (_, current) => current.map_or(0, count_captures),
+            };
             // GOW-Port: an "Optimize now" that was interrupted (the launcher closed, a crash, a failed build) leaves the
             // instrumented training build behind. With the game closed and nothing running it is rebuilt at once, whether or not
             // the background optimization is on: the installer reuses the profile if the training finished, otherwise it builds
@@ -573,12 +642,12 @@ impl Optimizer {
                 && state.destination.as_deref().is_some_and(|d| is_instrumented(&compiled_executable(d)));
             if leftover {
                 state.last_failure = None;
-                state.captured = state.destination.as_deref().map_or(0, count_captures);
+                state.captured = captured;
                 true
             } else if !state.configured() {
                 return;
             } else {
-                Self::check_configured(&mut state)
+                Self::check_configured(&mut state, captured)
             }
         };
         self.changed();
@@ -588,8 +657,8 @@ impl Optimizer {
     }
 
     /// The rest of [`Self::check`], for an installation whose background optimization is on: whether a rebuild starts now.
-    fn check_configured(state: &mut State) -> bool {
-        state.captured = state.destination.as_deref().map_or(0, count_captures);
+    fn check_configured(state: &mut State, captured: u32) -> bool {
+        state.captured = captured;
         if state.run.is_some() {
             return false;
         }

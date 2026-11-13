@@ -59,10 +59,11 @@ describe('image adjustment in the Graphics tab', () => {
 });
 
 describe('render resolution and the in-game overlay', () => {
-  it('offers render resolutions up to 8x', async () => {
+  it('offers render resolutions from a quarter of the PS2 up to 8x', async () => {
     const { user, patch } = await openGraphics();
     await user.click(screen.getByRole('combobox', { name: 'Render resolution' }));
-    expect(screen.getAllByRole('option', { name: /^\d+(\.5)?×|^Native/ })).toHaveLength(10);
+    expect(screen.getAllByRole('option', { name: /^\d+(\.\d+)?×|^Native/ })).toHaveLength(13);
+    expect(screen.getByRole('option', { name: /^0\.25×/ })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: /^9×/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole('option', { name: /^8×/ }));
     await waitFor(() => expect(patch).toHaveBeenCalledWith({ internalResolution: '8' }));

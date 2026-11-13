@@ -18,6 +18,9 @@ namespace ps2_gs_stage
     // Starts the stage thread (once). `process` runs each packet on the stage thread; `afterBatch` runs there
     // after each batch of packets (used to wake the EE when the GS raised an interrupt).
     void start(ProcessFn process, std::function<void()> afterBatch);
+    // PS2X_GS_PIPELINE=0: no stage thread; push() runs `process` at once on the calling thread (the GS worker), so the
+    // markers PS2Memory pushes (display registers, early FINISH) still reach the GS frontend in order.
+    void setDirect(ProcessFn process);
     void stop();
     bool running();
     bool onStageThread();

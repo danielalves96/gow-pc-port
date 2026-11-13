@@ -4,7 +4,7 @@ import { getApi, idleActivity, noUpdate, type Api } from '../lib/backend';
 import { asLanguage, format, formatDuration, systemLocale, translate } from '../lib/i18n';
 import { gigabytes, nextOverall } from '../lib/texturePack';
 import type {
-  Bootstrap, GameFinished, GameStatus, Language, LaunchError, OptimizerSnapshot, RebuildState, Settings, TexturePackOutcome,
+  Bootstrap, GameFinished, GameStatus, Language, LaunchError, OptimizerSnapshot, RebuildState, Settings, StartNotice, TexturePackOutcome,
   TexturePackProgress, TexturePackStatus, UpdateBlocker, UpdateState,
 } from '../lib/types';
 
@@ -116,6 +116,9 @@ function readProfileOfferDismissed(): boolean {
 
 const idleTextureInstall: TextureInstall = { active: false, progress: null, installed: null };
 
+/** When the bundle began to run, from the page's navigation (WebView2 start and loading the bundle come before it). */
+const scriptStarted = performance.now();
+
 const SAVE_DELAY_MS = 200;
 const TOAST_MS = 4800;
 
@@ -180,13 +183,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   // Boot: backend, migrated settings, first status.
+  const bootTime = useRef(0);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      const bootStarted = performance.now();
       const backend = await getApi();
       const data = await backend.bootstrap(systemLocale());
       const detected = await backend.detectPaths(false);
       if (cancelled) return;
+      bootTime.current = performance.now() - bootStarted;
       setApi(backend);
       setBoot(data);
       setSettings(detected);
@@ -214,6 +220,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     },
     [api, notify],
   );
+
+  // GOW-Port (issue #40): a direct start that did not go as planned opens the window with the reason, worded as PLAY's own.
+  const showStartNotice = useCallback(
+    (notice: StartNotice) => {
+      const language = asLanguage(settingsRef.current?.language ?? 'en');
+      const { finished, launchError } = notice;
+      if (finished?.failed) {
+        showError(
+          format(language, 'finishedFailure', finished.code ?? '?'),
+          finished.summary,
+          finished.failureKind ? translate(language, finished.failureKind) : '',
+        );
+      } else if (launchError) {
+        showError(format(language, launchError.key, launchError.detail), launchError.key === 'errorArranque' ? '' : launchError.detail);
+      }
+    },
+    [showError],
+  );
+
+  useEffect(() => {
+    if (boot?.notice) showStartNotice(boot.notice);
+  }, [boot, showStartNotice]);
 
   // Events from the Rust side.
   useEffect(() => {
@@ -254,6 +282,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         else showError(translate(language, 'texturePackFailed'), event.error ?? undefined);
       }),
       api.on('close-blocked', () => setCloseBlocked(true)),
+      api.on('start-notice', showStartNotice),
       api.on('update-state', setUpdate),
       api.on('install-progress', () => setInstalling(true)),
       api.on('install-done', () => {
@@ -282,7 +311,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       stops.forEach((stop) => void stop.then((off) => off()));
     };
-  }, [api, adoptSettings, notify, showError, refreshStatus, refreshRebuild]);
+  }, [api, adoptSettings, notify, showError, showStartNotice, refreshStatus, refreshRebuild]);
 
   useEffect(() => {
     void refreshStatus();
@@ -412,6 +441,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     pending.current = {};
     adoptSettings(await api.resetGameOptions());
   }, [api, adoptSettings]);
+
+  // The first screen with data is on its way: logged once, after the frame that draws it.
+  const reported = useRef(false);
+  useEffect(() => {
+    if (reported.current || !api || !boot || !settings) return;
+    reported.current = true;
+    requestAnimationFrame(() => setTimeout(() => void api.startupReady(scriptStarted, bootTime.current).catch(() => undefined), 0));
+  }, [api, boot, settings]);
 
   // "--play" and "--wizard" come from the shortcut; a missing game opens the wizard once.
   const started = useRef(false);

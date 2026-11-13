@@ -1,4 +1,5 @@
 #include "runtime/gs/gs_stage.h"
+#include "runtime/ps2_perf.h"
 
 #include <atomic>
 #include <chrono>
@@ -10,6 +11,14 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <algorithm>
+#include <bit>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
@@ -23,7 +32,7 @@
 //   thread). In combat the worker sends hundreds of thousands of packets a second; the former mutex + vector queue made
 //   both threads take the lock for every packet and woke the sleeping stage through the kernel for most of them. Packets
 //   are now written into the ring and read in place; the mutex and condition variables are used only when a side really
-//   sleeps, which the stage first avoids by spinning up to GOW_GS_STAGE_SPIN_US (default 50, 0: sleep at once). The bound
+//   sleeps, which the stage first avoids by spinning up to GOW_GS_STAGE_SPIN_US (default 50 with 4 or more usable processors, else 0; 0: sleep at once). The bound
 //   on queued bytes is kept (4 MB); a packet over 1 MB goes through a heap copy. afterBatch still runs after every batch.
 //   Idea from gow-native-pc runtime patch 44 (there: combat +3.5% on top of its leaner VU1 code).
 // - queue (GOW_GS_STAGE_RING=0): the former queue, for A/B comparisons.
@@ -45,11 +54,28 @@ namespace
         return on;
     }
 
+    // Logical processors this process may run on (its affinity mask on Windows, so a run pinned with -Cores counts too).
+    unsigned usableProcessors()
+    {
+#ifdef _WIN32
+        DWORD_PTR process = 0, system = 0;
+        if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0)
+            return static_cast<unsigned>(std::popcount(static_cast<uint64_t>(process)));
+#endif
+        return std::max(1u, std::thread::hardware_concurrency());
+    }
+
+    // GOW-Port: the idle spin only pays where the stage has a core to itself. Measured at 60 FPS with the launcher's
+    // environment (3 alternating pairs, cold first run excluded): on 4 cores spinning 50 us keeps the EE from waiting on a
+    // sleeping stage (EE 3.9 ms per frame with it, 7.3 without); on 2 cores the spin takes CPU from the EE and the VU1
+    // (44.3 FPS with it, 49.5 without). So the default is 50 us from 4 usable processors up and 0 below.
     uint64_t spinMicroseconds()
     {
         static const uint64_t us = [] {
             const char *v = std::getenv("GOW_GS_STAGE_SPIN_US");
-            return v ? static_cast<uint64_t>(std::strtoull(v, nullptr, 10)) : 50ull;
+            if (v)
+                return static_cast<uint64_t>(std::strtoull(v, nullptr, 10));
+            return usableProcessors() >= 4u ? 50ull : 0ull;
         }();
         return us;
     }
@@ -350,6 +376,10 @@ namespace
                 st.common.diag.idleUs += busySince - idleSince;
             }
             // A batch: every record complete when it was taken. readPos moves after each one, freeing its room.
+            // GOW-Port: GOW_PERF_DIAG accounts the whole batch to the Gs bucket once; GS::processGIFPacket no longer
+            // reads the clock twice per packet inside it.
+            {
+            ps2_perf::Scope batchPerf(ps2_perf::Bucket::Gs);
             while (read != write)
             {
                 uint8_t *at = s.ring.get() + (read % kRingBytes);
@@ -371,6 +401,7 @@ namespace
                 read += length;
                 s.readPos.store(read, std::memory_order_seq_cst);
                 ringReleased(s);
+            }
             }
             if (st.common.afterBatch)
                 st.common.afterBatch();
@@ -519,8 +550,30 @@ namespace ps2_gs_stage
         return running() && std::this_thread::get_id() == stage().common.threadId;
     }
 
+    namespace
+    {
+        ProcessFn &directProcess()
+        {
+            static ProcessFn fn;
+            return fn;
+        }
+    }
+
+    void setDirect(ProcessFn process)
+    {
+        directProcess() = std::move(process);
+    }
+
     void push(GifPathId path, const uint8_t *data, uint32_t size)
     {
+        // GOW-Port: without the stage thread (PS2X_GS_PIPELINE=0) the packet is processed at once: the ring was never
+        // allocated and the markers PS2Memory pushes used to crash the game at boot in that mode.
+        if (!running())
+        {
+            if (directProcess())
+                directProcess()(path, data, size);
+            return;
+        }
         if (stage().ring)
             ringPush(path, data, size);
         else

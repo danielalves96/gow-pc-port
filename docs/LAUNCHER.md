@@ -41,24 +41,24 @@ A pack applies the next time the game starts. [`TEXTURES.md`](TEXTURES.md) expla
 | Control | Default | What it does |
 |---|---|---|
 | Graphics card | Automatic | On Windows: Power saving (integrated) or High performance (dedicated); on Linux the launcher sets the PRIME variables. The game always renders on the card that drives the window, so a dedicated GPU is much faster |
-| FPS limit | 60 | The game's real frame rate. 60 is the native rate, 120 runs the game smoother and **240 is experimental**: the game logic runs at that rate with the game kept at normal speed (smoother, never faster). The window refreshes at the monitor's rate. Settings from older versions go back to 60 once |
+| FPS limit | 60 | The game's real frame rate. 60 is the native rate and 120, the highest, runs the game smoother: the game logic runs at that rate with the game kept at normal speed (smoother, never faster). At 60 the window follows the game's own frames (the smoothest pacing on any monitor); at 120 it refreshes at the monitor's rate, at most 120. VSync is used only on a monitor of 120 Hz or less: above that it is ignored, since it would push the window past the cap. Settings from older versions go back to 60 once, and a 240 saved by 0.3.3 or older becomes 120 |
 | Vertical sync | Off | Prevents tearing; locks the presentation to the display refresh. **Not recommended**: a frame that misses a refresh waits for the next one, which shows as stutter and input lag. Leave it off unless tearing bothers you and your display has no FreeSync/G-Sync; turning it on shows a warning |
-| In-game overlay: FPS counter, GPU, CPU, RAM | Off | One switch per line of the overlay in the corner of the screen: the game's real frame rate (never above the FPS limit), GPU usage, temperature and video memory, CPU usage and clock, and the RAM the game uses. Values the system does not report are not drawn. Whoever had the old FPS switch on keeps all four |
+| In-game overlay: FPS counter, GPU, CPU, RAM | Off | One switch per line of the overlay in the corner of the screen: the game's real frame rate (FPS, never above the FPS limit) with, under it, the new pictures that reach the screen (GS; lower than FPS means the picture repeats and feels like stutter), GPU usage, temperature and video memory, CPU usage and clock, and the RAM the game uses. Values the system does not report are not drawn. Whoever had the old FPS switch on keeps all four |
 | Background optimization | On | Recompiles the parts of the game you have reached, in the background, after you close the game |
 | Also while playing | **Off** | Rebuilds with the game open. It competes for the CPU and freezes the picture for tens of seconds, so leave it off unless you are debugging |
 | Optimize now | - | Runs one optimization pass immediately |
-| Speed profile | - | Windows, clang builds (0.3.0). **Optimize now** trains a speed profile (clang PGO) for this PC: the game opens by itself for about 4 minutes on a scripted fight (do not touch the keyboard), then the game is rebuilt with the profile, about 15 minutes in all. The launcher asks first, then locks itself (PLAY included) behind a window with the three steps until the end; it has a *Cancel* button. The row shows **Active** once the build uses a profile. The profile is made from your game on your PC and never leaves it |
+| Speed profile | - | Windows, clang builds. Every clang build already uses the runtime-only profile that ships with the launcher (made from our own runtime, nothing from the game). **Optimize now** is an optional extra: it trains a full profile (clang PGO) on this PC, which also covers the recompiled game code and the VU1 blocks (in tests about 20 % less VU1 and EE time per frame on top of the shipped profile): the game opens by itself for about 4 minutes on a scripted fight (do not touch the keyboard), then the game is rebuilt with it, about 15 minutes in all. The launcher asks first, then locks itself (PLAY included) behind a window with the three steps until the end; it has a *Cancel* button. The row shows **Active** once the build uses the profile trained on this PC. That profile is made from your game on your PC and never leaves it |
 | Rebuild now | - | Only shown, as a note at the top of the tab, when this launcher carries game fixes your build does not have yet (see below) |
 
-**The speed-profile offer.** After an installation with clang, the first screen shows *Optimization available: more FPS* with
+**The speed-profile offer.** After an installation with clang, the first screen shows *Extra optimization available* with
 **Optimize now** and **Later**. *Later* hides the notice on this PC; the Performance tab keeps the button. The installation
-itself does one build only, so the first game is ready as soon as possible, and the optimization never runs while you play.
+itself does one build only (with the shipped profile, so the game never opens by itself during the installation), and the optimization never runs while you play.
 
 **An interrupted optimization.** The first step builds a test version of the game that counts what the code does; it runs
 several times slower and exists only for the 4 minutes of training. If the optimization stops halfway (the launcher closed,
 a crash, a failed build), the launcher never opens that version: PLAY shows *FINISHING*, the first screen says *Slow test
 version installed*, and the game is rebuilt the normal way by itself as soon as the launcher is open and the game closed
-(with the profile, if the training had finished). *Rebuild now* on that notice starts it at once.
+(with the trained profile if the training had finished, otherwise with the shipped one). *Rebuild now* on that notice starts it at once.
 
 The launcher shows a loading spinner while it starts (finding the game can take a few seconds).
 
@@ -90,10 +90,32 @@ the runtime files: then it asks once.
 | Game executable (`SCUS_973.99`) | The PS2 program from your disc. Verified by CRC; "Modified ELF · experimental build" means the file was changed |
 | Disc image (ISO) | Optional: if it is empty, an `.iso` beside the game or the already-extracted files are used. The field disappears once the game data is in place |
 | Port runner (`gow-2005`) | The compiled game program |
-| Memory card | Read-only: the folder next to `SCUS_973.99` (`mc0`). Saves themselves live in `Mcd001.ps2` (see [`PLAYING.md`](PLAYING.md#saves-and-the-memory-card)) |
+| Memory card | Read-only: the card image `Mcd001.ps2` next to `SCUS_973.99`, which holds every save; **Open** opens its folder (see [`PLAYING.md`](PLAYING.md#saves-and-the-memory-card)) |
 
 **Find files automatically** looks next to the launcher, in a repository checkout above it and in the default
 installation folder. **Setup wizard** reopens the installer.
+
+### Saves
+
+Lists the God of War saves on the memory card as the game's own list shows them: the altar's thumbnail and name, the
+difficulty, the play time (`h:mm:ss`), the slot and when the game wrote it. The names and thumbnails are read from your
+installed disc (the extracted files next to `SCUS_973.99`, or the ISO); with a CHD, or before the game is installed, the
+page shows the zone code instead (`Athn02C`).
+
+**Load** goes to that save:
+
+- **With the game open** it asks first (progress since the last save is lost), then the game goes back to its main menu,
+  picks Load and that slot by itself, from gameplay, the pause menu, the main menu or the title screen. It takes a few
+  seconds; the game shows a notice when it starts and when a slot cannot be loaded.
+- **With the game closed** it starts the game, which opens on that save instead of the intro. A request the game has not
+  taken within ten minutes is dropped.
+
+Below it is the **save history**: the dated copies the game makes at every altar. **Back up now** adds a manual copy.
+**Show saves** opens what a copy holds; **Restore** puts it in place of the card, only with the game closed, and keeps the
+card it replaces in the history (`Before a restore`). The page follows the card and the history while the game runs.
+
+The same list is in the game: **F2** (the cheat menu), then **Tab** or **LB/RB** for the **Saves** page; press the load
+button twice to confirm. Under RetroAchievements Hardcore the F2 menu is off, and the launcher's Load is the way in.
 
 ### Controls
 
@@ -115,7 +137,9 @@ physical position. F1/F2/F11 are reserved and marked as such.
 ### Cheats
 
 The nine cheats that start enabled (the same list is available in game with **F2**), plus the gamepad button or
-two-button combo that opens the cheat menu. Details: [`PLAYING.md`](PLAYING.md#cheat-menu-f2).
+two-button combo that opens the cheat menu. Details: [`PLAYING.md`](PLAYING.md#cheat-menu-f2). What you change inside the game (these cheats, the overlay lines, the image
+adjustments) is read back when the game ends, so these tabs always show what the last session left
+([`PLAYING.md`](PLAYING.md#settings-that-follow-you)).
 
 ### Achievements
 
@@ -126,7 +150,8 @@ be saved. Hardcore disables all cheats. See [`PLAYING.md`](PLAYING.md#achievemen
 ### Other
 
 Language (English / Brazilian Portuguese), **Skip FMV videos**, **Fast boot** (cuts the intro animation and may cut the
-opening lines; not recommended), **Minimize the launcher while playing**, **Automatic updates** (off by default, see
+opening lines; not recommended), **Minimize the launcher while playing**, **Start the game directly** and **Steam** (see
+[Starting the game without the launcher](#starting-the-game-without-the-launcher)), **Automatic updates** (off by default, see
 [Updating the launcher](#updating-the-launcher)), shortcuts, **Last game log**, **Session report** and **Mark a problem** (see [Reports](#reports)), **Restore defaults** (resets graphics,
 performance, controls and cheats; your file paths and the button layout you built for a controller the system does not know are kept) and the About box.
 
@@ -174,6 +199,7 @@ The data folder is `%APPDATA%\GOW_PC\Launcher` on Windows and `~/.local/share/GO
 | Last game log (stdout + stderr) | `logs/last.log` (the previous run becomes `logs/previous.log`) |
 | Installer and optimizer logs | `logs/install.log`, `logs/optimize.log` |
 | Launcher update checks and installs | `logs/update.log` |
+| How long each start of the launcher took, and direct starts | `logs/launcher-startup.log` |
 | Installation kit shipped with the launcher | `kit/` in the data folder |
 | Kit repairs (a file that went missing and was restored) | `logs/kit.log` |
 | Last game session (how it ended) and your problem markers | `logs/last-session.json`, `logs/markers.jsonl` |
@@ -190,11 +216,44 @@ configured.
 
 1. The files are checked again (runner executable, ELF present, CRC).
 2. The game starts as `<gow-2005> <SCUS_973.99>` with the settings translated into environment variables, with its
-   stdout and stderr going to `logs/last.log`.
+   stdout and stderr going to `logs/last.log`. Among them, always `GOW_NATIVE_CHEATS_MENU=1`: the **Port Options** entry
+   of the game's own pause menu, with **Cheats**, **In Game Overlay** and **Image Adjustments** inside (the overlay page switches the
+   Performance tab's FPS, GPU, CPU and RAM lines on and off during the session, the image page moves its brightness, contrast, gamma and
+   saturation sliders; neither is saved back to the launcher; the game leaves its stock menu alone under RetroAchievements Hardcore
+   or with other game data; a `GOW_NATIVE_CHEATS_MENU=0` already in your environment turns it off).
 3. The launcher can minimize itself and reappears when the game exits.
 4. On exit you get the session length, or an error with the last lines of the log and a button to open it.
 
 The launcher also pauses a background rebuild while the game is running, and resumes it afterwards.
+
+## Starting the game without the launcher
+
+For Steam, or a shortcut that should open the game itself. The launcher still does the work of PLAY (the settings become the
+game's environment, the session and play time are recorded, the optimizer pauses), but its window is never created, so
+WebView2 never starts: the game opens a few milliseconds after the launcher. The launcher closes when the game closes, so
+Steam sees the session end.
+
+- **Other → Start the game directly**: every start of the launcher opens the game. **Hold Shift** while opening it to get
+  the window (Windows), or start it with `--launcher`.
+- **`--play`** does the same for one start, whatever the setting (the "Play now" action of the Linux menu entry uses it).
+- **Steam**: Games > Add a Non-Steam Game, then **Browse** to the launcher (**Other → Steam → Copy path** puts its path
+  on the clipboard). With **Start the game directly** on nothing else is needed; otherwise put `--play` in the entry's
+  launch options.
+- The window opens instead, with the reason, when the game cannot start: not installed (the wizard), a launch error, or a game
+  that closed with an error (the same dialog as after PLAY). A window opened during such a session (starting the launcher
+  again) can be closed: the launcher waits for the game before it ends.
+- A second start while the launcher is open hands its arguments to the open one: `--play` opens the game there.
+
+`logs/launcher-startup.log` (the newest 200 lines) records each start: when the interface was ready and where the time
+went (`setup` before the window, `page script` for WebView2 and the interface, `first calls`), or when a direct start opened
+the game.
+
+**Checked** (Windows, a private copy of a card): with the setting on, the game opened 18 ms after the launcher started, no
+WebView2 process was created, and the launcher ended with code 0 when the game window was closed, with the session added to the
+play time; a game killed mid-session opened the window with the failure dialog; `--launcher` and an installation that is not
+ready opened the window (the second one in the wizard); `--play` given to a second start opened the game from the launcher
+already open. **Not checked**: Steam itself (the overlay and Steam Input on the game started by the launcher), Shift held
+while opening (the key is read with `GetAsyncKeyState`), Linux.
 
 ## Installing the launcher
 

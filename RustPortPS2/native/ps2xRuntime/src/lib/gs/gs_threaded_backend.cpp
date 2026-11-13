@@ -11,9 +11,12 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono>
+#include <thread>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <emmintrin.h>
 #include <xmmintrin.h>
 
 namespace
@@ -55,6 +58,23 @@ namespace
         std::memcpy(&value, data, sizeof(T));
         return value;
     }
+}
+
+void GSProducerLock::lockSlow()
+{
+    // A short spin first: the holder usually releases within a few hundred cycles.
+    for (unsigned spins = 0u; spins < 256u; ++spins)
+    {
+        uint32_t expected = 0u;
+        if (m_state.load(std::memory_order_relaxed) == 0u &&
+            m_state.compare_exchange_strong(expected, 1u, std::memory_order_acquire, std::memory_order_relaxed))
+            return;
+        _mm_pause();
+    }
+    // Then announce a waiter (state 2) and block until an unlock wakes us. Taking the lock as 2 keeps the wake chain going
+    // for any other waiter (one extra notify at most when there is none).
+    while (m_state.exchange(2u, std::memory_order_acquire) != 0u)
+        m_state.wait(2u, std::memory_order_relaxed);
 }
 
 GSThreadedBackend::GSThreadedBackend(std::unique_ptr<GSRasterBackend> inner)
@@ -99,33 +119,38 @@ void GSThreadedBackend::SetEnabledByDefault(bool enabled)
 }
 
 
-void GSThreadedBackend::Enqueue(Op op, const void *payload, uint32_t size)
+void GSThreadedBackend::Enqueue(Op op, const void *payload, uint32_t size, bool stateKnownSame)
 {
-    std::lock_guard<std::mutex> lock(m_producerMutex);
+    std::lock_guard<GSProducerLock> lock(m_producerMutex);
     const uint32_t csr = _mm_getcsr();
     if (csr != m_lastMxcsr)
     {
         m_lastMxcsr = csr;
-        const uint8_t header = static_cast<uint8_t>(Op::Mxcsr);
         const uint32_t csrSize = sizeof(csr);
-        m_open.push_back(header);
-        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&csrSize), reinterpret_cast<const uint8_t *>(&csrSize) + 4);
-        m_open.insert(m_open.end(), reinterpret_cast<const uint8_t *>(&csr), reinterpret_cast<const uint8_t *>(&csr) + 4);
+        uint8_t *at = m_open.extend(1u + sizeof(csrSize) + sizeof(csr));
+        at[0] = static_cast<uint8_t>(Op::Mxcsr);
+        std::memcpy(at + 1u, &csrSize, sizeof(csrSize));
+        std::memcpy(at + 1u + sizeof(csrSize), &csr, sizeof(csr));
     }
+    // GOW-Port: header (kind + length) and payload written with one capacity check, not two vector inserts.
     const auto append = [&](Op kind, const void *bytes, uint32_t length)
     {
-        uint8_t header[5];
-        header[0] = static_cast<uint8_t>(kind);
-        std::memcpy(header + 1u, &length, sizeof(length));
-        m_open.insert(m_open.end(), header, header + sizeof(header));
+        uint8_t *at = m_open.extend(1u + sizeof(length) + length);
+        at[0] = static_cast<uint8_t>(kind);
+        std::memcpy(at + 1u, &length, sizeof(length));
         if (length)
-            m_open.insert(m_open.end(), static_cast<const uint8_t *>(bytes), static_cast<const uint8_t *>(bytes) + length);
+            std::memcpy(at + 1u + sizeof(length), bytes, length);
     };
     if (op == Op::Submit && m_compactQueue)
     {
         const auto &draw = *static_cast<const GSPrimitiveBatch *>(payload);
         // GOW-Port: field by field, not memcmp (padding bytes are unspecified: with clang no two states compared equal).
-        if (!m_drawStateValid || !(m_lastDrawState == draw.state))
+        // Identical bytes imply identical fields, so a memcmp that matches is conclusive and costs a few vector compares;
+        // only a mismatch (a real change, or different padding) pays for the field-by-field comparison.
+        // GOW-Port: stateKnownSame (SubmitSameState): the frontend saw no state register change since the previous draw, so the
+        // bytes equal m_lastDrawState whenever that is valid; skip the comparison.
+        if (!m_drawStateValid ||
+            (!stateKnownSame && !(std::memcmp(&m_lastDrawState, &draw.state, sizeof(draw.state)) == 0 || m_lastDrawState == draw.state)))
         {
             std::memcpy(&m_lastDrawState, &draw.state, sizeof(draw.state));
             m_drawStateValid = true;
@@ -144,7 +169,7 @@ void GSThreadedBackend::PublishLocked()
     if (m_open.empty())
         return;
     static const bool queueDiag = std::getenv("GOW_GS_QUEUE_DIAG") != nullptr;
-    std::vector<uint8_t> next;
+    GSCommandBuffer next;
     {
         std::unique_lock<std::mutex> lock(m_queueMutex);
         const auto waitStart = queueDiag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -178,7 +203,7 @@ void GSThreadedBackend::Drain() const
     auto *self = const_cast<GSThreadedBackend *>(this);
     uint64_t target = 0u;
     {
-        std::lock_guard<std::mutex> lock(m_producerMutex);
+        std::lock_guard<GSProducerLock> lock(m_producerMutex);
         self->PublishLocked();
         std::lock_guard<std::mutex> queueLock(m_queueMutex);
         target = m_published;
@@ -188,14 +213,49 @@ void GSThreadedBackend::Drain() const
                   { return m_completed >= target || m_stop; });
 }
 
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+extern "C"
+{
+    __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
+    __declspec(dllimport) int __stdcall GetProcessAffinityMask(void *process, unsigned long long *processMask,
+                                                              unsigned long long *systemMask);
+}
+#endif
+
+namespace
+{
+    // Logical processors this process may run on (its affinity mask on Windows, so a run pinned with -Cores counts too).
+    unsigned usableProcessorsForGl()
+    {
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+        unsigned long long process = 0, system = 0;
+        if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0)
+            return static_cast<unsigned>(std::popcount(process));
+#endif
+        return std::max(1u, std::thread::hardware_concurrency());
+    }
+
+    // The GL thread runs above normal priority only where the process has a core to spare. On 2 cores it preempted the EE
+    // and the VU1 (measured at 60 FPS with the launcher's environment, 3 alternating pairs: 51.1 -> 52.2 FPS, worst 5 s
+    // window 31.9 -> 37.2, frames over 50 ms 152 -> 113 with it off). PS2X_THREAD_PRIORITY=0/1 still forces it.
+    bool raiseGlThread()
+    {
+        const char *value = std::getenv("PS2X_THREAD_PRIORITY");
+        if (value && *value)
+            return *value != '0';
+        return usableProcessorsForGl() >= 4u;
+    }
+}
+
 void GSThreadedBackend::WorkerLoop()
 {
     ThreadNaming::SetCurrentThreadName("GSThread");
-    ThreadPriority::RaiseCurrentThread(ThreadPriority::Level::AboveNormal);
+    if (raiseGlThread())
+        ThreadPriority::RaiseCurrentThread(ThreadPriority::Level::AboveNormal);
     GSPrimitiveBatch draw;
     for (;;)
     {
-        std::vector<uint8_t> chunk;
+        GSCommandBuffer chunk;
         {
             std::unique_lock<std::mutex> lock(m_queueMutex);
             m_workCv.wait(lock, [&]
@@ -222,7 +282,7 @@ void GSThreadedBackend::WorkerLoop()
     }
 }
 
-void GSThreadedBackend::Execute(const std::vector<uint8_t> &chunk, GSPrimitiveBatch &draw)
+void GSThreadedBackend::Execute(const GSCommandBuffer &chunk, GSPrimitiveBatch &draw)
 {
     const uint8_t *data = chunk.data();
     const size_t size = chunk.size();
@@ -312,6 +372,13 @@ void GSThreadedBackend::Submit(const GSPrimitiveBatch &batch)
     Enqueue(Op::Submit, &batch, sizeof(batch));
 }
 
+void GSThreadedBackend::SubmitSameState(const GSPrimitiveBatch &batch)
+{
+    if (GsInventory::get().enabled())
+        GsInventory::get().draw(batch);
+    Enqueue(Op::Submit, &batch, sizeof(batch), true);
+}
+
 void GSThreadedBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     if (GsInventory::get().enabled())
@@ -390,7 +457,7 @@ PresentationFrame GSThreadedBackend::Present(const GSPresentationRequest &reques
                 return {};
         }
         Enqueue(Op::Present, &request, sizeof(request));
-        std::lock_guard<std::mutex> lock(m_producerMutex);
+        std::lock_guard<GSProducerLock> lock(m_producerMutex);
         PublishLocked();
         return {};
     }

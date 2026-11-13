@@ -4,8 +4,8 @@
 1 ICON "gow.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,2,0
- PRODUCTVERSION 0,2,2,0
+ FILEVERSION 0,4,0,0
+ PRODUCTVERSION 0,4,0,0
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
 BEGIN
@@ -14,9 +14,9 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "FileDescription", "God of War (2005) native port"
-            VALUE "FileVersion", "0.3.3"
+            VALUE "FileVersion", "0.4.0"
             VALUE "ProductName", "God of War (2005) native port"
-            VALUE "ProductVersion", "0.3.3"
+            VALUE "ProductVersion", "0.4.0"
             VALUE "InternalName", "gow-2005"
             VALUE "OriginalFilename", "gow-2005.exe"
         END

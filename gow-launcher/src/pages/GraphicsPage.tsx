@@ -5,7 +5,7 @@ import { useApp } from '../state/app';
 import { activePreset, presetChange, type PresetId } from '../lib/presets';
 import type { DisplayInfo } from '../lib/types';
 
-const SCALES = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8];
+const SCALES = [0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8];
 /** Shade Boost value that leaves the picture untouched (`IMAGE_NEUTRAL` in gow-core). */
 export const IMAGE_NEUTRAL = 50;
 const IMAGE_ADJUSTMENTS = [
@@ -119,7 +119,7 @@ export function GraphicsPage() {
   const scaleOptions: Option[] = SCALES.map((n) => ({
     text: scaleText(n, t, f),
     value: String(n),
-    detail: n === 2 ? t('internalRecommended') : n >= 4 ? t('internalHeavy') : undefined,
+    detail: n === 2 ? t('internalRecommended') : n >= 4 ? t('internalHeavy') : n < 1 ? t('internalBelowNative') : undefined,
   }));
 
   const preset = activePreset(settings);

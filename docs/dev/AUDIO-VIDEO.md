@@ -104,6 +104,20 @@ the video ring's write pointer is moved to the base when it sits at the end (the
 player read the end as data), and the stream poll counts host time already spent as guest time (`EeScheduler::catchUpToHost`, one field
 per call), so the movie thread does not fall to ~0.72x real time.
 
+**End of a movie.** The game reads a movie through a stream (`0x2FDE10`: `+0x28` state, 3 once the file reached its end; `+0x24`
+the 16 KB blocks still queued) and the read callback `0x188848` hands the blocks out. When none are left it returns 0, and the
+refill `0x18AC20` takes 0 for "nothing yet": in its blocking path it calls the callback again, for ever; only a negative result
+stores the read-EOF flag (`movie+0x154`). `gowMovieStreamRead` answers -1 for that call (from `0x18AC70` or `0x18AD34`, size
+positive, stream at its end, nothing queued, no cancel flag `0x29C848`). The completion test `0x189B00` returns 1 as soon as
+the flag is set, and the decoder could still hold pictures, so `gowMovieCompletion` waits for the decoder's reference buffer
+(`*(*(movie+0x40))`, what `0x26FF70` reads) to be written by the MPEG stub, for at most 1.5 s. The drain loop after the last
+picture (`0x189794`) calls the audio refill `0x189A88` without the stream service's host-time catch-up, so
+`gowMovieTailAudio` applies the same one-field catch-up at that call site. `GOW_MOVIE_EOF=0` turns the first two off.
+Checked: `P04MP05` (the Cliffs of Madness lever movie, 741 pictures) plays to its end and returns to the game with and without
+the change in this runtime, so the freeze reported against another build of the port was **not reproduced here**; the
+wrappers only act when the stream is drained and the flag is set, which did not happen in that run. They are kept because
+they are the cause that build's reporter and the disassembly point to, not because a failure here was fixed.
+
 Widescreen needs no decoder handling: the game asks for a name without extension and loads the `.PSW` variant where the
 disc has one. With widescreen on, the port's only part is the VBlank hook (`gow_integration.cpp`): while a movie loads or
 plays (states 3-9 and 11 of `0x29C838`) it keeps `0x304D94` at its original value and writes `0x7F04 = 1`.

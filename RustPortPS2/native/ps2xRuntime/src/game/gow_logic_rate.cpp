@@ -15,7 +15,7 @@
 // counted a0 VBlanks in 0x29C7D4, and clears that counter. So the game never runs faster than 60 frames per second
 // and never steps less than 1/60 s.
 //
-// With PC_LOGIC_FPS=N (120, 144, 165, 240) the runtime's VBlank stays at 60 Hz (it also counts video fields, the movie
+// With PC_LOGIC_FPS=N (N = 120, the only rate above 60: the project caps the game at 120 FPS) the runtime's VBlank stays at 60 Hz (it also counts video fields, the movie
 // sync and other waits) and two things change:
 //   - gowLogicFrameWait (0x17A1D0, only the call from the frame end): sleeps the EE thread to the next 1/N s slot of
 //     guest time instead of counting VBlanks;
@@ -216,7 +216,7 @@ namespace gow_game
         static uint64_t nextSlot = 0u; // guest cycle of the next logic frame
         const uint32_t ra = GPR_U32(ctx, 31);
         const bool interruptsOn = (ctx->cop0_status & 0x10000u) != 0u; // the thread may block (as in DelayThread)
-        if (ctx->pc != kFrameWaitEntry || ra != kFrameEndReturn || !interruptsOn || fallsBackTo60(rdram))
+        if (ctx->pc != kFrameWaitEntry || ra != kFrameEndReturn || !interruptsOn || gowLogicFps() <= 60 || fallsBackTo60(rdram))
         {
             if (ctx->pc == kFrameWaitEntry && ra == kFrameEndReturn)
             {

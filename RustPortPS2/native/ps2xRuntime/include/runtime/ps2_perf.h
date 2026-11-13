@@ -12,6 +12,13 @@
 #include <cstring>
 #include <string>
 #include <algorithm>
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
+#endif
 
 namespace ps2_perf
 {
@@ -53,11 +60,37 @@ namespace ps2_perf
     inline std::array<std::atomic<uint64_t>, bucketCount> nanos{};
     inline std::atomic<uint64_t> guestFlips{0}, hostFrames{0};
     inline thread_local Accounting accounting;
-    inline uint64_t nowNanos()
+    inline uint64_t steadyNanos()
     {
         return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
     }
+#if defined(__x86_64__) || defined(_M_X64)
+    // GOW-Port: the buckets are read from the time-stamp counter, scaled once against steady_clock. The launcher always
+    // sets GOW_PERF_DIAG=1, and every Scope read the clock twice (QueryPerformanceCounter on Windows): hundreds of
+    // thousands of reads a second across the EE, VU1 and GS threads, ~7 % of the game thread on 2 cores. The buckets are
+    // diagnostics only ([gow-perf], the hitch report), so the TSC's precision is plenty; on an old CPU without an
+    // invariant TSC they would drift with the clock speed, and nothing else depends on them.
+    inline double tscNanosPerTick()
+    {
+        static const double scale = [] {
+            const uint64_t t0 = steadyNanos();
+            const uint64_t c0 = __rdtsc();
+            uint64_t t1 = t0;
+            while (t1 - t0 < 2000000u) // 2 ms, once per process
+                t1 = steadyNanos();
+            const uint64_t c1 = __rdtsc();
+            return c1 > c0 ? static_cast<double>(t1 - t0) / static_cast<double>(c1 - c0) : 1.0;
+        }();
+        return scale;
+    }
+    inline uint64_t nowNanos()
+    {
+        return static_cast<uint64_t>(static_cast<double>(__rdtsc()) * tscNanosPerTick());
+    }
+#else
+    inline uint64_t nowNanos() { return steadyNanos(); }
+#endif
     inline void switchTo(Bucket next)
     {
         const auto charge = accounting.switchTo(next, nowNanos());

@@ -14,6 +14,9 @@ public:
     virtual void Reset() = 0;
 
     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
+    // GOW-Port: Submit for a draw whose batch.state is byte-identical to the one of the previous Submit/SubmitSameState call of
+    // the same producer (the frontend knows no state register was written in between). Backends may skip comparing it.
+    virtual void SubmitSameState(const GSPrimitiveBatch &batch) { Submit(batch); }
     virtual void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) = 0;
 
     virtual void BeginTransfer(const GSTransferCommand &command) = 0;

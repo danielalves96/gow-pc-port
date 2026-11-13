@@ -8,6 +8,7 @@
 #include "runtime/gs/gs_texture_replace.h"
 
 #include <array>
+#include <atomic>
 #include <map>
 #include <algorithm>
 #include <chrono>
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 #include <deque>
 #include <functional>
 #include <filesystem>
@@ -26,6 +28,28 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// GOW-Port: per-frame hitch report (gow_integration.cpp, GOW_FRAMES_HITCH_LOG): texture decodes (with their upload) and
+// new render targets, summed here and read as deltas around each slow game frame.
+std::atomic<uint64_t> g_gowHitchTexDecodes{0}, g_gowHitchTexDecodeNs{0}, g_gowHitchTexTexels{0}, g_gowHitchTargets{0};
+
+namespace
+{
+    struct GowDecodeTimer
+    {
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        explicit GowDecodeTimer(uint64_t texels)
+        {
+            g_gowHitchTexDecodes.fetch_add(1, std::memory_order_relaxed);
+            g_gowHitchTexTexels.fetch_add(texels, std::memory_order_relaxed);
+        }
+        ~GowDecodeTimer()
+        {
+            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
+            g_gowHitchTexDecodeNs.fetch_add(static_cast<uint64_t>(ns.count()), std::memory_order_relaxed);
+        }
+    };
+}
 
 namespace
 {
@@ -524,6 +548,34 @@ void main()
     }
 }
 
+// GOW-Port: the internal render scale can be changed while the game runs (the Image Quality page of the menus). gowGsScaleSet only records the
+// request; the backend applies it at the start of its next draw, clear or present (applyPendingScale), on the thread that owns the GL
+// context. The current scale and the largest one the GPU allows are published for the menu.
+static std::atomic<float> g_gowPendingScale{0.0f};
+static std::atomic<float> g_gowCurrentScale{0.0f};
+static std::atomic<float> g_gowMaxScale{16.0f};
+// GOW-Port: the internal scale may go below 1x (a quarter of the PS2's resolution at the least) for integrated GPUs: the render
+// targets, scissors, vertex offsets and the presentation all size by the float `scale`, and the picture is stretched to the
+// window by the scaler afterwards.
+static constexpr float kMinRenderScale = 0.25f;
+
+void gowGsScaleSet(float scale)
+{
+    g_gowPendingScale.store(scale, std::memory_order_relaxed);
+}
+
+float gowGsScaleGet()
+{
+    const float pending = g_gowPendingScale.load(std::memory_order_relaxed);
+    if (pending > 0.0f)
+        return std::min(pending, g_gowMaxScale.load(std::memory_order_relaxed));
+    const float current = g_gowCurrentScale.load(std::memory_order_relaxed);
+    if (current > 0.0f)
+        return current;
+    const char *s = std::getenv("PS2X_GS_HW_SCALE"); // before the renderer exists
+    return s ? std::max(kMinRenderScale, static_cast<float>(std::atof(s))) : 2.0f;
+}
+
 struct GSHwBackend::Impl
 {
     bool xferWatchHit = false; // GOW_GS_HW_XFERWATCH: log the next upload's first bytes
@@ -539,6 +591,78 @@ struct GSHwBackend::Impl
     // target: DATE, blending in the shader, Z in the color). Fewer GPU registers and branches: most of the game's batches
     // only sample one texture. GOW_GS_FAST=0 disables it.
     GLuint programFast = 0, activeProgram = 0;
+    // GOW-Port: the last value draw() wrote to each of its uniforms, per program (GL keeps uniform values per program).
+    // draw() wrote 25-40 uniforms for every batch, most of them unchanged; skipping the repeats is what gta-vcs-recomp
+    // measured at ~10 % on an Intel HD 520. Only the uniforms draw() writes go through it: no other code writes them, and
+    // draw() binds the program first. Reset when the programs are created.
+    struct UniformShadow
+    {
+        static constexpr GLint kSlots = 128;
+        GLuint program = 0;
+        std::array<std::array<int32_t, 4>, kSlots> value{};
+        std::array<bool, kSlots> set{};
+    };
+    UniformShadow uniformShadow[2];
+    uint64_t uniformWrites = 0, uniformSkips = 0;
+
+    // True when `loc` of the active program must be written with these words (and records them).
+    bool uniformChanged(GLint loc, int32_t a, int32_t b = 0, int32_t c = 0, int32_t d = 0)
+    {
+        if (loc < 0)
+            return false; // GL ignores location -1
+        UniformShadow *shadow = nullptr;
+        for (UniformShadow &u : uniformShadow)
+            if (u.program == activeProgram)
+                shadow = &u;
+        if (!shadow)
+            for (UniformShadow &u : uniformShadow)
+                if (u.program == 0u && !shadow)
+                {
+                    u.program = activeProgram;
+                    shadow = &u;
+                }
+        if (!shadow || loc >= UniformShadow::kSlots)
+        {
+            ++uniformWrites;
+            return true;
+        }
+        const std::array<int32_t, 4> words{a, b, c, d};
+        if (shadow->set[static_cast<size_t>(loc)] && shadow->value[static_cast<size_t>(loc)] == words)
+        {
+            ++uniformSkips;
+            return false;
+        }
+        shadow->set[static_cast<size_t>(loc)] = true;
+        shadow->value[static_cast<size_t>(loc)] = words;
+        ++uniformWrites;
+        return true;
+    }
+    static int32_t floatWord(float value)
+    {
+        int32_t word;
+        std::memcpy(&word, &value, sizeof(word));
+        return word;
+    }
+    void setUniform1i(GLint loc, GLint x)
+    {
+        if (uniformChanged(loc, x))
+            gl().Uniform1i(loc, x);
+    }
+    void setUniform1f(GLint loc, float x)
+    {
+        if (uniformChanged(loc, floatWord(x)))
+            gl().Uniform1f(loc, x);
+    }
+    void setUniform2f(GLint loc, float x, float y)
+    {
+        if (uniformChanged(loc, floatWord(x), floatWord(y)))
+            gl().Uniform2f(loc, x, y);
+    }
+    void setUniform4i(GLint loc, GLint x, GLint y, GLint z, GLint w)
+    {
+        if (uniformChanged(loc, x, y, z, w))
+            gl().Uniform4i(loc, x, y, z, w);
+    }
     const bool fastShaderEnabled = [] { const char *e = std::getenv("GOW_GS_FAST"); return !e || *e != '0'; }();
     uint64_t fastBatches = 0, fullBatches = 0;
     // GOW_GS_ALPHA_BOUNDS=0 disables the alpha bounds (see the alpha test in draw)
@@ -563,7 +687,8 @@ struct GSHwBackend::Impl
     int shuffleWhy = 0; // debug: which tryShuffle check rejected the last sprite
     RenderTarget *shuffleDst = nullptr, *shuffleSrc = nullptr;
     bool shuffleSrcZ = false;
-    std::unordered_map<uint32_t, std::vector<uint16_t>> ownerInverse; // psm -> in-page word index -> y * 64 + x
+    // GOW-Port: flat (GSSwizzle::GetFormat masks psm with 0x3F, so does this index); was an unordered_map looked up per pixel
+    std::array<std::vector<uint16_t>, 64> ownerInverse; // psm -> in-page word index -> y * 64 + x
     std::unordered_map<const uint16_t *, uint32_t> tableOffset;
     std::unordered_map<uint32_t, uint32_t> inverseOffset; // psm -> offset of the inverse page table
     std::vector<HwVertex> pending;
@@ -786,6 +911,7 @@ struct GSHwBackend::Impl
             failed = true;
             return false;
         }
+        uniformShadow[0] = uniformShadow[1] = UniformShadow{}; // GOW-Port: new programs, nothing written yet
         program = g.CreateProgram();
         g.AttachShader(program, v);
         g.AttachShader(program, f);
@@ -889,20 +1015,24 @@ struct GSHwBackend::Impl
                 g.BindVertexArray(vao);
             }
         }
+        float limitScale = 16.0f;
         if (const char *s = std::getenv("PS2X_GS_HW_SCALE"))
-            scale = std::max(1.0f, static_cast<float>(std::atof(s)));
+            scale = std::max(kMinRenderScale, static_cast<float>(std::atof(s)));
         // GOW-Port: the launcher offers up to 8x. A render target is fbw * 64 PS2 pixels wide (God of War uses fbw <= 10,
         // 640 px) and 512 tall; keep a 1024 x 512 target within the GPU's texture limit (16384 on most cards: 16x).
         {
             GLint maxTexture = 0;
             g.GetIntegerv(GSGL::kMaxTextureSize, &maxTexture);
             const float limit = maxTexture > 0 ? static_cast<float>(maxTexture) / 1024.0f : 16.0f;
+            limitScale = limit;
             if (scale > limit)
             {
                 std::fprintf(stderr, "[gs-hw] scale %.2f exceeds the GPU texture limit (%d px): using %.2f\n", scale, maxTexture, limit);
                 scale = limit;
             }
         }
+        g_gowCurrentScale.store(scale, std::memory_order_relaxed);
+        g_gowMaxScale.store(std::max(1.0f, std::floor(limitScale)), std::memory_order_relaxed);
         // GOW-Port: record the launcher's effective decision to tell a selected
         // fallback from a run that actually stayed at 3x.
         const char *fallback = std::getenv("PC_FALLBACK_SMOOTHNESS");
@@ -975,6 +1105,68 @@ struct GSHwBackend::Impl
         return targets.back();
     }
 
+    // GOW-Port: gowGsScaleSet. Every render target is re-created at the new size and gets the old picture (a linear blit, depth with
+    // nearest), then the scale changes: everything that sizes by `scale` (draws, scissors, presentation) follows from then on. The
+    // pending batch is flushed first, so no vertex drawn at the old scale is left behind.
+    void applyPendingScale()
+    {
+        const float wanted = g_gowPendingScale.load(std::memory_order_relaxed);
+        if (wanted <= 0.0f)
+            return;
+        g_gowPendingScale.store(0.0f, std::memory_order_relaxed);
+        const float next = std::clamp(wanted, kMinRenderScale, g_gowMaxScale.load(std::memory_order_relaxed));
+        if (!initialized || std::fabs(next - scale) < 0.001f)
+            return;
+        flushPending();
+        const Api &g = gl();
+        constexpr GLenum kReadFb = 0x8CA8, kDrawFb = 0x8CA9;
+        for (RenderTarget &t : targets)
+        {
+            if (!t.fbo)
+                continue;
+            const uint32_t nw = static_cast<uint32_t>(std::ceil(t.pxW * next)), nh = static_cast<uint32_t>(std::ceil(t.pxH * next));
+            GLuint color = 0, fbo = 0, depth = 0;
+            g.GenTextures(1, &color);
+            g.BindTexture(kTexture2D, color);
+            g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kRgba8), nw, nh, 0, kRgba, kUnsignedByte, nullptr);
+            g.TexParameteri(kTexture2D, kTextureMinFilter, kLinear);
+            g.TexParameteri(kTexture2D, kTextureMagFilter, kLinear);
+            g.GenFramebuffers(1, &fbo);
+            g.BindFramebuffer(kFramebuffer, fbo);
+            g.FramebufferTexture2D(kFramebuffer, kColorAttachment0, kTexture2D, color, 0);
+            if (t.depth)
+            {
+                g.GenTextures(1, &depth);
+                g.BindTexture(kTexture2D, depth);
+                g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kDepthComponent32F), nw, nh, 0, kDepthComponent, kFloat, nullptr);
+                g.TexParameteri(kTexture2D, kTextureMinFilter, kNearest);
+                g.TexParameteri(kTexture2D, kTextureMagFilter, kNearest);
+                g.FramebufferTexture2D(kFramebuffer, kDepthAttachment, kTexture2D, depth, 0);
+            }
+            g.Disable(kScissorTest);
+            g.BindFramebuffer(kReadFb, t.fbo);
+            g.BindFramebuffer(kDrawFb, fbo);
+            g.BlitFramebuffer(0, 0, static_cast<GLint>(t.glW), static_cast<GLint>(t.glH), 0, 0, static_cast<GLint>(nw), static_cast<GLint>(nh),
+                              kColorBufferBit, kLinear);
+            if (depth)
+                g.BlitFramebuffer(0, 0, static_cast<GLint>(t.glW), static_cast<GLint>(t.glH), 0, 0, static_cast<GLint>(nw),
+                                  static_cast<GLint>(nh), kDepthBufferBit, kNearest);
+            g.DeleteFramebuffers(1, &t.fbo);
+            g.DeleteTextures(1, &t.color);
+            if (t.depth)
+                g.DeleteTextures(1, &t.depth);
+            t.fbo = fbo;
+            t.color = color;
+            t.depth = depth;
+            t.glW = nw;
+            t.glH = nh;
+        }
+        g.BindFramebuffer(kFramebuffer, 0);
+        std::fprintf(stderr, "[gs-hw] render scale %.2f -> %.2f (changed in game, %zu targets)\n", scale, next, targets.size());
+        scale = next;
+        g_gowCurrentScale.store(scale, std::memory_order_relaxed);
+    }
+
     void destroy(RenderTarget &t)
     {
         const Api &g = gl();
@@ -986,6 +1178,7 @@ struct GSHwBackend::Impl
 
     void createTarget(RenderTarget &t, uint32_t fbp, uint32_t fbw)
     {
+        g_gowHitchTargets.fetch_add(1, std::memory_order_relaxed); // GOW-Port: hitch report
         const Api &g = gl();
         t.fbp = fbp;
         t.psm = 0;
@@ -1255,6 +1448,7 @@ struct GSHwBackend::Impl
             return tex;
         }
         ++stats.texDecodes;
+        const GowDecodeTimer decodeTimer(static_cast<uint64_t>(s.textureWidth) * s.textureHeight); // GOW-Port: hitch report
         classifyTexture(s);
         const Api &g = gl();
         std::vector<uint32_t> pixels;
@@ -1370,6 +1564,7 @@ struct GSHwBackend::Impl
             return tex;
         }
         ++stats.texDecodes;
+        const GowDecodeTimer decodeTimer(static_cast<uint64_t>(s.textureWidth) * s.textureHeight); // GOW-Port: hitch report
         classifyTexture(s);
         tex.width = std::max<uint32_t>(1u, s.textureWidth);
         tex.height = std::max<uint32_t>(1u, s.textureHeight);
@@ -1705,12 +1900,31 @@ struct GSHwBackend::Impl
         // GOW-Port: field by field (gs_types.h operator==). memcmp also compared the padding bytes between the fields, which
         // the language leaves unspecified: MSVC happened to keep them equal most of the time, clang does not, and then no two
         // states compared equal (every primitive its own batch: ~2 fps in 3D; gow-native-pc runtime patch 12).
-        return a == b;
+        // GOW-Port: states reach here byte for byte as the frontend built them (zero padding, kept through the queue and copied
+        // with memcpy by copyState), so equal bytes are the common case and prove equal fields; only a mismatch (a real change,
+        // or padding that differs) pays for the field-by-field comparison.
+        return std::memcmp(&a, &b, sizeof(GSDrawState)) == 0 || a == b;
+    }
+    static_assert(std::is_trivially_copyable_v<GSDrawState>, "copyState copies the bytes");
+    static void copyState(GSDrawState &dst, const GSDrawState &src) { std::memcpy(&dst, &src, sizeof(GSDrawState)); }
+
+    // GOW-Port: per-draw constants of addVertex (they used to be recomputed for each of the vertices of the draw)
+    float vtxHalf = 0.0f, vtxOfx = 0.0f, vtxOfy = 0.0f;
+    uint64_t vtxZmask = 0;
+    bool vtxZmasked = false;
+
+    void prepareVertices(const GSDrawState &s, float zmax)
+    {
+        // identical expressions to the per-vertex ones they replace, so every value is bit for bit the same
+        vtxHalf = 0.5f / scale;
+        vtxOfx = static_cast<float>(s.context.xyoffset.ofx) / 16.0f;
+        vtxOfy = static_cast<float>(s.context.xyoffset.ofy) / 16.0f;
+        vtxZmasked = zmax < 4294967295.0f;
+        vtxZmask = zmax < 70000.0f ? 0xFFFFull : 0xFFFFFFull;
     }
 
-    void addVertex(const GSDrawState &s, const GSVertex &v, float u, float tv, float zmax)
+    void addVertex(const GSDrawState &, const GSVertex &v, float u, float tv, float zmax)
     {
-        const GSContext &c = s.context;
         if (pending.empty())
             firstRawZ = v.z;
         // The GS samples pixel (x, y) at the integer point (x, y); GL samples host pixel h at its centre h + 0.5. Shifting
@@ -1719,19 +1933,22 @@ struct GSHwBackend::Impl
         // pixel scale * x equal the PS2's at x. (Half a PS2 pixel moved every primitive one host pixel down and right at
         // 2x: host row/column 0 of every target stayed unpainted and each copy pass shifted the picture by a host pixel;
         // the filtered passes smeared that stale edge into the picture, the bright bar along the top and left.)
-        const float half = 0.5f / scale;
-        HwVertex h;
-        h.x = v.x - static_cast<float>(c.xyoffset.ofx) / 16.0f + half;
-        h.y = v.y - static_cast<float>(c.xyoffset.ofy) / 16.0f + half;
+        HwVertex &h = pending.emplace_back();
+        h.x = v.x - vtxOfx + vtxHalf;
+        h.y = v.y - vtxOfy + vtxHalf;
         // the Z buffer keeps only its low bits (Z24: 24, Z16: 16): a vertex Z of 1<<24 is stored as 0
         double zq = std::max(v.z, 0.0);
-        if (zmax < 4294967295.0f)
-            zq = static_cast<double>(static_cast<uint64_t>(zq) & (zmax < 70000.0f ? 0xFFFFull : 0xFFFFFFull));
+        if (vtxZmasked)
+        {
+            // a non-negative double below 2^63 converts identically through the signed instruction (the unsigned conversion
+            // costs a compare and a second path)
+            const uint64_t zi = zq < 9.0e18 ? static_cast<uint64_t>(static_cast<int64_t>(zq)) : static_cast<uint64_t>(zq);
+            zq = static_cast<double>(zi & vtxZmask);
+        }
         h.z = static_cast<float>(std::min(zq / zmax, 1.0));
         h.r = v.r; h.g = v.g; h.b = v.b; h.a = v.a;
         h.s = v.s; h.t = v.t; h.q = v.q;
         h.u = u; h.v = tv;
-        pending.push_back(h);
     }
 
     static bool family16(uint8_t psm) { return psm == GS_PSM_CT16 || psm == GS_PSM_CT16S; }
@@ -1749,7 +1966,7 @@ struct GSHwBackend::Impl
     // ---- channel shuffles (see kShuffleFs) -------------------------------------------------------------------------
     const std::vector<uint16_t> &inverseFor(uint32_t ownerPsm)
     {
-        std::vector<uint16_t> &inv = ownerInverse[ownerPsm];
+        std::vector<uint16_t> &inv = ownerInverse[ownerPsm & 0x3Fu];
         if (inv.empty())
         {
             const GSSwizzle::Format &f = GSSwizzle::GetFormat(ownerPsm);
@@ -1761,14 +1978,16 @@ struct GSHwBackend::Impl
     }
 
     // pixel (x, y) of a 16 bit view (psm/base/bw) -> pixel and halfword of the 32 bit owner laid out as ownerPsm at fbp/fbw
-    bool viewToOwner(uint32_t viewPsm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t ownerPsm, uint32_t fbp, uint32_t fbw,
-                     uint32_t &ox, uint32_t &oy, uint32_t &half)
+    // GOW-Port: the format of the view and the inverse table of the owner are looked up once per sprite by the caller
+    // (tryShuffle maps one 8x8 unit at a time: 2 lookups of each per unit); the arithmetic is the same.
+    static bool viewToOwnerWith(const GSSwizzle::Format &viewFormat, const uint16_t *inverse, uint32_t base, uint32_t bw, uint32_t x, uint32_t y,
+                                uint32_t fbp, uint32_t fbw, uint32_t &ox, uint32_t &oy, uint32_t &half)
     {
-        const uint32_t byte = GSSwizzle::Locate(GSSwizzle::GetFormat(viewPsm), base, bw, x, y).byte;
+        const uint32_t byte = GSSwizzle::Locate(viewFormat, base, bw, x, y).byte;
         const uint32_t word = byte >> 2, first = fbp * 2048u;
         if (word < first)
             return false;
-        const uint32_t rel = word - first, page = rel >> 11u, e = inverseFor(ownerPsm)[rel & 2047u];
+        const uint32_t rel = word - first, page = rel >> 11u, e = inverse[rel & 2047u];
         half = (byte >> 1) & 1u;
         ox = (page % fbw) * 64u + (e & 63u);
         oy = (page / fbw) * 32u + (e >> 6u);
@@ -1776,12 +1995,12 @@ struct GSHwBackend::Impl
     }
 
     // an 8x8 unit of the view at (x, y) -> an 8x8 owner block at (ox, oy), one halfword (checked at the far corner)
-    bool unitToOwner(uint32_t viewPsm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t ownerPsm, uint32_t fbp, uint32_t fbw,
-                     uint32_t &ox, uint32_t &oy, uint32_t &half)
+    static bool unitToOwnerWith(const GSSwizzle::Format &viewFormat, const uint16_t *inverse, uint32_t base, uint32_t bw, uint32_t x, uint32_t y,
+                                uint32_t fbp, uint32_t fbw, uint32_t &ox, uint32_t &oy, uint32_t &half)
     {
         uint32_t ex, ey, eh;
-        return viewToOwner(viewPsm, base, bw, x, y, ownerPsm, fbp, fbw, ox, oy, half) &&
-               viewToOwner(viewPsm, base, bw, x + 7u, y + 7u, ownerPsm, fbp, fbw, ex, ey, eh) && eh == half && ex == ox + 7u && ey == oy + 7u;
+        return viewToOwnerWith(viewFormat, inverse, base, bw, x, y, fbp, fbw, ox, oy, half) &&
+               viewToOwnerWith(viewFormat, inverse, base, bw, x + 7u, y + 7u, fbp, fbw, ex, ey, eh) && eh == half && ex == ox + 7u && ey == oy + 7u;
     }
 
     static uint32_t fbmsk16(uint32_t m)
@@ -1868,12 +2087,14 @@ struct GSHwBackend::Impl
         const uint32_t srcOwnerPsm = srcDepth ? 0x30u : 0x00u, srcFbp = srcDepth ? src->zbp : src->fbp;
         std::vector<ShuffleVertex> quads[4];
         uint32_t maxX = 0, maxY = 0;
+        const GSSwizzle::Format &dstView = GSSwizzle::GetFormat(c.frame.psm), &srcView = GSSwizzle::GetFormat(tpsm);
+        const uint16_t *dstInverse = inverseFor(0x00u).data(), *srcInverse = inverseFor(srcOwnerPsm).data();
         for (int y = y0; y < y1; y += 8)
             for (int x = x0; x < x1; x += 8)
             {
                 uint32_t dx, dy, hd, sx, sy, hs;
-                if (!unitToOwner(c.frame.psm, c.frame.fbp * 32u, c.frame.fbw, x, y, 0x00u, dst->fbp, dst->fbw, dx, dy, hd) ||
-                    !unitToOwner(tpsm, c.tex0.tbp0, c.tex0.tbw, x + du, y + dv, srcOwnerPsm, srcFbp, src->fbw, sx, sy, hs))
+                if (!unitToOwnerWith(dstView, dstInverse, c.frame.fbp * 32u, c.frame.fbw, x, y, dst->fbp, dst->fbw, dx, dy, hd) ||
+                    !unitToOwnerWith(srcView, srcInverse, c.tex0.tbp0, c.tex0.tbw, x + du, y + dv, srcFbp, src->fbw, sx, sy, hs))
                     { shuffleWhy = 12; return false; }
                 if (dx + 8u > dst->pxW || dy + 8u > dst->pxH || sx + 8u > src->pxW || sy + 8u > src->pxH)
                     { shuffleWhy = 13; return false; }
@@ -1894,7 +2115,7 @@ struct GSHwBackend::Impl
         if (!haveShuffle)
         {
             haveShuffle = true;
-            shuffleState = s;
+            copyState(shuffleState, s);
             shuffleDst = dst;
             shuffleSrc = src;
             shuffleSrcZ = srcDepth;
@@ -2018,10 +2239,11 @@ struct GSHwBackend::Impl
             flushPending();
         if (!havePending)
         {
-            pendingState = s;
+            copyState(pendingState, s);
             havePending = true;
         }
         const float zmax = zMaxFor(s.context.zbuf.psm);
+        prepareVertices(s, zmax);
         const float texW = static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), texH = static_cast<float>(std::max<uint16_t>(s.textureHeight, 1));
         const auto texelUV = [&](const GSVertex &v, float &u, float &t)
         {
@@ -2090,8 +2312,6 @@ struct GSHwBackend::Impl
                 const float q0 = std::fabs(a.q) < 1e-20f ? 1e-20f : a.q, q1 = std::fabs(c.q) < 1e-20f ? 1e-20f : c.q;
                 u0 = a.s / q0 * texW; v0 = a.t / q0 * texH; u1 = c.s / q1 * texW; v1 = c.t / q1 * texH;
             }
-            GSDrawState sp = s; // sprites carry texel UVs, never STQ
-            (void)sp;
             GSVertex corner[4] = {a, a, a, a};
             float xs[2] = {a.x, c.x}, ys[2] = {a.y, c.y};
             float us[2] = {u0, u1}, vs[2] = {v0, v1};
@@ -2620,32 +2840,32 @@ struct GSHwBackend::Impl
         if (!fast)
         {
             const bool date = dateTest;
-            g.Uniform1i(locDate, date ? 1 : 0);
-            g.Uniform1i(locDatm, ((c.test >> 15) & 1u) != 0u ? 1 : 0);
+            setUniform1i(locDate, date ? 1 : 0);
+            setUniform1i(locDatm, ((c.test >> 15) & 1u) != 0u ? 1 : 0);
             const uint64_t al = c.alpha;
-            g.Uniform1i(locSwBlend, softBlend && !zAliasWrite ? 1 : 0);
-            g.Uniform1i(locColClamp, (s.colclamp & 1u) != 0u ? 1 : 0);
-            g.Uniform4i(locAbcd, static_cast<GLint>(al & 3u), static_cast<GLint>((al >> 2) & 3u), static_cast<GLint>((al >> 4) & 3u), static_cast<GLint>((al >> 6) & 3u));
-            g.Uniform1f(locFix, static_cast<float>((al >> 32) & 0xFFu));
-            g.Uniform1i(locZAlias, zAlias ? 1 + static_cast<GLint>(ztst) : 0);
-            g.Uniform1i(locZAliasWrite, zAliasWrite ? 1 : 0);
-            g.Uniform1f(locZAliasMax, zMaxFor(c.zbuf.psm));
+            setUniform1i(locSwBlend, softBlend && !zAliasWrite ? 1 : 0);
+            setUniform1i(locColClamp, (s.colclamp & 1u) != 0u ? 1 : 0);
+            setUniform4i(locAbcd, static_cast<GLint>(al & 3u), static_cast<GLint>((al >> 2) & 3u), static_cast<GLint>((al >> 4) & 3u), static_cast<GLint>((al >> 6) & 3u));
+            setUniform1f(locFix, static_cast<float>((al >> 32) & 0xFFu));
+            setUniform1i(locZAlias, zAlias ? 1 + static_cast<GLint>(ztst) : 0);
+            setUniform1i(locZAliasWrite, zAliasWrite ? 1 : 0);
+            setUniform1f(locZAliasMax, zMaxFor(c.zbuf.psm));
             if (date || softBlend || zAlias)
             {
                 g.ActiveTexture(kTexture0 + 4);
                 g.BindTexture(kTexture2D, rt.color);
-                g.Uniform1i(locDest, 4);
+                setUniform1i(locDest, 4);
                 g.ActiveTexture(kTexture0);
                 g.TextureBarrier();
             }
         }
-        g.Uniform2f(locInvSize, 1.0f / rt.pxW, 1.0f / rt.pxH);
-        g.Uniform1i(locTme, s.prim.tme ? 1 : 0);
-        g.Uniform1i(locFst, s.prim.fst ? 1 : 0);
-        g.Uniform1i(locIip, s.prim.iip ? 1 : 0);
-        g.Uniform1i(locTfx, c.tex0.tfx);
-        g.Uniform1i(locTcc, c.tex0.tcc);
-        g.Uniform1f(locBlendScale, 1.0f / 128.0f);
+        setUniform2f(locInvSize, 1.0f / rt.pxW, 1.0f / rt.pxH);
+        setUniform1i(locTme, s.prim.tme ? 1 : 0);
+        setUniform1i(locFst, s.prim.fst ? 1 : 0);
+        setUniform1i(locIip, s.prim.iip ? 1 : 0);
+        setUniform1i(locTfx, c.tex0.tfx);
+        setUniform1i(locTcc, c.tex0.tcc);
+        setUniform1f(locBlendScale, 1.0f / 128.0f);
         int texAMin = 0, texAMax = 255; // GOW-Port: bounds of the sampled texel's alpha (255 = unknown)
         if (s.prim.tme)
         {
@@ -2659,8 +2879,8 @@ struct GSHwBackend::Impl
             Texture *const boundTexture = (src || rsrc || zsrc) ? nullptr : &tex;
             if (!(src || rsrc || zsrc) && !indexed)
                 texAMin = tex.minA, texAMax = tex.maxA;
-            g.Uniform1i(locIndexed, indexed ? 1 : 0);
-            g.Uniform1i(locLinear, s.linearFilter ? 1 : 0);
+            setUniform1i(locIndexed, indexed ? 1 : 0);
+            setUniform1i(locLinear, s.linearFilter ? 1 : 0);
             if (indexed)
             {
                 g.ActiveTexture(kTexture0 + 5);
@@ -2675,24 +2895,24 @@ struct GSHwBackend::Impl
                     if (lo <= hi)
                         texAMin = lo, texAMax = hi;
                 }
-                g.Uniform1i(locIdxPalette, 5);
-                g.Uniform4i(locWrap, (c.clamp & 3u) == 0u ? 0 : 1, ((c.clamp >> 2) & 3u) == 0u ? 0 : 1, 0, 0);
+                setUniform1i(locIdxPalette, 5);
+                setUniform4i(locWrap, (c.clamp & 3u) == 0u ? 0 : 1, ((c.clamp >> 2) & 3u) == 0u ? 0 : 1, 0, 0);
             }
             g.ActiveTexture(kTexture0);
             g.BindTexture(kTexture2D, zsrc ? zsrc->depth : src ? src->color : rsrc ? rsrc->color : tex.id);
             if (!fast)
             {
-                g.Uniform1i(locZTex, !zsrc ? 0 : c.tex0.psm == 0x32 || c.tex0.psm == 0x3A ? 16 : c.tex0.psm == 0x31 ? 24 : 32);
-                g.Uniform1f(locZMax, zsrc ? zMaxFor(static_cast<uint8_t>(c.tex0.psm)) : 1.0f);
+                setUniform1i(locZTex, !zsrc ? 0 : c.tex0.psm == 0x32 || c.tex0.psm == 0x3A ? 16 : c.tex0.psm == 0x31 ? 24 : 32);
+                setUniform1f(locZMax, zsrc ? zMaxFor(static_cast<uint8_t>(c.tex0.psm)) : 1.0f);
             }
-            g.Uniform1i(locRtTex24, !(src || rsrc) ? 0 : c.tex0.psm == GS_PSM_CT24 ? 1 : family16(c.tex0.psm) ? 2 : 0);
+            setUniform1i(locRtTex24, !(src || rsrc) ? 0 : c.tex0.psm == GS_PSM_CT24 ? 1 : family16(c.tex0.psm) ? 2 : 0);
             if (!fast)
-                g.Uniform1i(locReinterp, rsrc ? 1 : 0);
+                setUniform1i(locReinterp, rsrc ? 1 : 0);
             if (rsrc)
                 setupReinterpret(s, *rsrc);
-            g.Uniform1f(locTa0, static_cast<float>(s.texa.ta0));
-            g.Uniform1f(locTa1, static_cast<float>(s.texa.ta1));
-            g.Uniform1i(locAem, s.texa.aem ? 1 : 0);
+            setUniform1f(locTa0, static_cast<float>(s.texa.ta0));
+            setUniform1f(locTa1, static_cast<float>(s.texa.ta1));
+            setUniform1i(locAem, s.texa.aem ? 1 : 0);
             const GLint filter = (indexed || zsrc) ? kNearest : s.linearFilter ? kLinear : kNearest;
             const uint64_t clamp = c.clamp;
             const GLint wu = (clamp & 3u) == 0u ? kRepeat : kClampToEdge, wv = ((clamp >> 2) & 3u) == 0u ? kRepeat : kClampToEdge;
@@ -2712,18 +2932,18 @@ struct GSHwBackend::Impl
             setSampler(kTextureMagFilter, filter, boundTexture ? &boundTexture->magFilter : nullptr);
             setSampler(kTextureWrapS, wu, boundTexture ? &boundTexture->wrapS : nullptr);
             setSampler(kTextureWrapT, wv, boundTexture ? &boundTexture->wrapT : nullptr);
-            g.Uniform1i(locTex, 0);
-            g.Uniform2f(locTexDim, static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), static_cast<float>(std::max<uint16_t>(s.textureHeight, 1)));
+            setUniform1i(locTex, 0);
+            setUniform2f(locTexDim, static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), static_cast<float>(std::max<uint16_t>(s.textureHeight, 1)));
             if (zsrc)
             {
-                g.Uniform2f(locTexSize, static_cast<float>(zsrc->pxW), static_cast<float>(zsrc->pxH));
+                setUniform2f(locTexSize, static_cast<float>(zsrc->pxW), static_cast<float>(zsrc->pxH));
             }
             else if (src)
-                g.Uniform2f(locTexSize, static_cast<float>(src->pxW), static_cast<float>(src->pxH));
+                setUniform2f(locTexSize, static_cast<float>(src->pxW), static_cast<float>(src->pxH));
             else if (replacement) // the PS2 texture's size: the coordinates keep their meaning whatever the replacement's resolution
-                g.Uniform2f(locTexSize, static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), static_cast<float>(std::max<uint16_t>(s.textureHeight, 1)));
+                setUniform2f(locTexSize, static_cast<float>(std::max<uint16_t>(s.textureWidth, 1)), static_cast<float>(std::max<uint16_t>(s.textureHeight, 1)));
             else
-                g.Uniform2f(locTexSize, static_cast<float>(tex.width), static_cast<float>(tex.height));
+                setUniform2f(locTexSize, static_cast<float>(tex.width), static_cast<float>(tex.height));
         }
         g.BindVertexArray(vao);
         g.BindBuffer(kArrayBuffer, vbo);
@@ -2748,9 +2968,9 @@ struct GSHwBackend::Impl
             ++stats.testHist[(ate ? 1ull : 0ull) | (static_cast<uint64_t>(atst) << 1) | (static_cast<uint64_t>(afail) << 4) |
                              (static_cast<uint64_t>(aref) << 8) | (s.prim.tme ? 1ull << 16 : 0ull) | (s.prim.abe ? 1ull << 17 : 0ull)];
         }
-        g.Uniform1i(locAte, ate ? 1 : 0);
-        g.Uniform1i(locAtst, static_cast<GLint>(atst));
-        g.Uniform1i(locAref, static_cast<GLint>(aref));
+        setUniform1i(locAte, ate ? 1 : 0);
+        setUniform1i(locAtst, static_cast<GLint>(atst));
+        setUniform1i(locAref, static_cast<GLint>(aref));
         static const bool forceNoTest = std::getenv("GOW_GS_HW_NOATEST") != nullptr;
         // ATST=ALWAYS/NEVER is independent of texture and vertex alpha: avoid a full redundant pass.
         // GOW-Port: also when the fragment alpha bounds (vertices; texture according to TFX and its texels' bounds)
@@ -2815,8 +3035,8 @@ struct GSHwBackend::Impl
         if (alphaAlways) ++stats.alphaAlwaysFast;
         if (alphaNever) ++stats.alphaNeverFast;
         if (ate && failIsNoop) ++stats.alphaNoopFail;
-        g.Uniform1i(locPass, (ate && !forceNoTest && !alphaAlways && !alphaNever) ? 1 : 0);
-        g.Uniform1i(locFailTint, 0);
+        setUniform1i(locPass, (ate && !forceNoTest && !alphaAlways && !alphaNever) ? 1 : 0);
+        setUniform1i(locFailTint, 0);
         static const int traceAt = std::getenv("GOW_GS_HW_DEPTHTRACE") ? std::atoi(std::getenv("GOW_GS_HW_DEPTHTRACE")) : -1;
         const bool tracing = traceAt >= 0 && presentCount >= traceAt && presentCount < traceAt + 1 && rt.depth && rt.fbp == 0;
         const auto depthStats = [&](const char *when)
@@ -2900,9 +3120,9 @@ struct GSHwBackend::Impl
             if (s.prim.tme) ++stats.alphaSecondPassTextured; else ++stats.alphaSecondPassUntextured;
             // failing fragments: 1 FB_ONLY (colour+alpha, no Z), 2 ZB_ONLY (Z only), 3 RGB_ONLY (colour, no alpha, no Z)
             if (!alphaNever)
-                g.Uniform1i(locPass, 2);
+                setUniform1i(locPass, 2);
             static const bool failTint = std::getenv("GOW_GS_HW_FAILTINT") != nullptr;
-            g.Uniform1i(locFailTint, (failTint && afail == 3u && s.prim.tme && c.frame.fbp == 0u) ? 1 : 0);
+            setUniform1i(locFailTint, (failTint && afail == 3u && s.prim.tme && c.frame.fbp == 0u) ? 1 : 0);
             if (afail == 1u) { g.DepthMask(kFalse); }
             else if (afail == 2u) { g.ColorMask(kFalse, kFalse, kFalse, kFalse); }
             else { g.DepthMask(kFalse); g.ColorMask(mr, mg, mb, kFalse); }
@@ -3031,6 +3251,10 @@ struct GSHwBackend::Impl
                          (unsigned long long)stats.alphaSecondPass, (unsigned long long)stats.alphaSecondPassTextured,
                          (unsigned long long)stats.alphaSecondPassUntextured,
                          (unsigned long long)stats.textureParamsSet, (unsigned long long)stats.textureParamsSaved, textures.size());
+        if (statsEnabled) // GOW-Port: draw() uniforms written and skipped as unchanged (UniformShadow)
+            std::fprintf(stderr, "[gs-hw] uniforms written=%llu skipped=%llu\n", (unsigned long long)uniformWrites,
+                         (unsigned long long)uniformSkips);
+        uniformWrites = uniformSkips = 0;
         if (statsEnabled)
         {
             // GOW-Port: fill (host Mpixels per window and per batch), vertices and split of ATE/ATST/AFAIL/AREF
@@ -3135,6 +3359,7 @@ void GSHwBackend::Submit(const GSPrimitiveBatch &batch)
     if (!d.ensure())
         return;
     Impl::ProfileScope profile(d.profileEnabled ? &d.submitNs : nullptr);
+    d.applyPendingScale();
     d.submit(batch);
 }
 
@@ -3226,6 +3451,7 @@ bool GSHwBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
     Impl &d = *m_impl;
     if (!d.ensure() || context.frame.fbw == 0u)
         return false;
+    d.applyPendingScale();
     d.flushPending();
     const Api &g = d.gl();
     RenderTarget &rt = d.target(context.frame.fbp, context.frame.fbw);
@@ -3277,6 +3503,7 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &requestIn)
     PresentationFrame frame;
     if (!d.ensure())
         return frame;
+    d.applyPendingScale();
     struct GpuFrameRestart
     {
         Impl &backend;

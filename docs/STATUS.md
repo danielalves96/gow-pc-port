@@ -49,7 +49,7 @@ Last reviewed: October 2026, against the code in this repository.
 
 | Area | Limitation |
 |---|---|
-| Frame rate | 60 FPS by default, the PS2's own rate. The 120 FPS limit and the **experimental** 240 run the game logic at that rate with the game kept at real-time speed; actions timed in frames (QTEs, combo windows) are not fully verified there yet. Heavy scenes on integrated GPUs drop below 60 |
+| Frame rate | 60 FPS by default, the PS2's own rate. The 120 FPS limit (the highest: nothing runs above 120) runs the game logic at that rate with the game kept at real-time speed; actions timed in frames (QTEs, combo windows) are not fully verified there yet. Heavy scenes on integrated GPUs drop below 60 |
 | Multi-threading | The VU1 thread is the CPU bottleneck in combat. The optimization pass converts more of it to native code over time. Since 0.3.2 early FINISH lets the game prepare the next frame while the VU1 draws the current one (+17% in the reference fight at the 120 FPS limit; Performance → Early FINISH turns it off) |
 | Window | At 3× and above, presentation can stall behind the GPU on mid-range cards; the launcher caps presentation at 60 FPS there |
 | Widescreen | With Hor+ on, the HUD and 2D screens are stretched horizontally (the PCSX2 patch does not correct them), more the wider the aspect |
@@ -66,12 +66,57 @@ Last reviewed: October 2026, against the code in this repository.
 
 ## Open problems
 
+- **Features added after 0.3.4 and what was checked** (Windows, private copy of a PCSX2 card, Radeon RX 6600): the save history
+  (copy made at the exact moment the game completes a save, identical to the card, original untouched), the effect switches
+  (altar glow gone, rest identical), render scale 0.75x (clean). **Not clean:** 0.5x and 0.25x show a tinted rectangle in
+  bloom-heavy scenes. **Not reproduced:** the movie-end freeze of `P04MP05`; its wrappers are in but never triggered. **Not
+  checked:** the tail-of-movie audio catch-up (needs ears), Linux for any of it, the in-game notice at other window sizes.
+- **Loading a slot from the launcher or the F2 menu** (Windows, private copies of a PCSX2 card): at start, during gameplay
+  and with the pause menu open the game went back to its main menu and loaded the slot asked for (the play time of each slot
+  confirms which one); an empty slot is refused without leaving the game. The launcher's Saves page reads the altar's
+  name, difficulty, play time and thumbnail from the card and the installed disc (checked against the retail disc). **Not
+  checked:** the F2 page with a real keyboard or gamepad (its drawing and the request path were), a request during a movie,
+  a level load or the save screen, a CHD install (the page falls back to the zone code), Linux. Details in
+  [`dev/MEMORY-CARD.md`](dev/MEMORY-CARD.md#loading-a-slot-from-outside-the-games-menus).
+- **Launcher start-up, direct start and downloads** (Windows, a launcher release build with its own data folder): the window
+  was ready in 0.41 to 0.44 s instead of 14.5 to 30.6 s with 414,000 captured microprograms (the count no longer runs before
+  the window, nor once per file). With **Start the game directly** (issue #40) the game opened 18 ms after the launcher started,
+  without WebView2, and the launcher ended with it; failures, `--launcher` and a missing installation opened the window. The
+  installer's downloads (issue #39) were each checked with the four ways (`Invoke-WebRequest`, `HttpClient`, `curl.exe`, BITS),
+  the fallback when the first fails, and a file saved by hand. **Not checked:** Steam itself (overlay, Steam Input), Shift held at
+  start, a full installation on a PC where `Invoke-WebRequest` fails, Linux. Details in [`LAUNCHER.md`](LAUNCHER.md#starting-the-game-without-the-launcher).
+- **Display kept on during play** (Windows): the game holds a keep-awake request while its window is on screen
+  (`[gow-awake]`); the log showed it taken at start, released when the window was minimized and taken again when it was
+  restored. **Not checked:** an idle timeout actually reached with a controller in hand (the request was seen in the log, not
+  in `powercfg /requests`, which needs administrator rights), Linux (nothing is done there yet).
+
 - **Hang after saving (Windows):** after a save completes, a sequence of events can freeze the game. It was first
   traced to the VIF/DMA path; a 0.3.2 sample (clang build with the speed profile, early FINISH on) instead shows the game
   spinning in the animation controller update `0x116EF0`, in the loop that walks an animation's time in fixed steps
   (`0x117358..0x117384`), at the end of the save menus. Why that loop stops converging is not known yet: since this change the
   hang report prints its values (`[gow-hang] animation step loop` / `animation controller`). Not fixed; see
   [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for what to collect.
+- **Blocky picture after saving (issue #34):** right after a save, a VU1 command stream reached a reserved VIFcode in every
+  frame (`[vif1] unhandled VIFcode opcode=25`). A stream that stops while PATH3 is masked never unmasks it, so texture
+  uploads stayed queued until a restart, the likely cause of the picture; since 0.4.0 they are released. Not verified in
+  game yet. Which command misaligns the stream is not known: the first faults now print the commands before them.
+- **Character stuck after the sixth Gorgon Eye (issue #35):** reproduced by one player many times; the log just stops,
+  with no hang report. Since 0.4.0 a crash leaves a `[gow-crash]` line and the log is no longer cut at exit. Not fixed.
+- **Permanent freeze after a call through a bad function pointer (issues #20 and #37):** in both reports the game made
+  an indirect call to an address that is not a function (#20: to 0, from the UI timeline's clip list `0x149340`, on the
+  way from the docks to the first Medusa; #37: to `0x308B527B`, from the per-frame function `0x1D6CD0`, right after the
+  movie of Kratos climbing Cronos, on a translated disc). The callers unwound, the main thread went dormant and the
+  picture froze. Since 0.4.0:
+  - #37: `0x1D6CD0` makes a virtual call on Kratos (the first field of the player controller `0x29CD58`) with no NULL
+    check, and Kratos was still NULL in the first frames after the movie, so the vtable was read from address 4. The
+    update is skipped while there is no Kratos (`[gow-heapguard] player update skipped`). Why Kratos is missing there
+    (the experimental 120 Hz logic was on and the disc was a translation) is not known.
+  - #20: the guard of `0x149340` reported nothing, so the list header itself was outside the range it checked; a list
+    with such a header is now emptied (`[gow-heapguard] clone list: bad header`). What corrupts the header is not known.
+  - Any other call to an address that is not a function is skipped and logged (`[gow-badcall]`, `GOW_BAD_CALL_SKIP=0`
+    to turn it off) instead of freezing the game.
+
+  None of the three was reproduced in game: the fixes come from the two logs and the disassembly.
 - **Windows Release build:** the default installer configuration (no whole-program optimization, AVX2 off) has never
   been compared in game against the faster development build. Numbers measured in a development build may
   not carry over.
@@ -86,6 +131,10 @@ Last reviewed: October 2026, against the code in this repository.
   5 s that only the clang build had (writing a log line cost the game 50-100 ms) is fixed: the log now goes through its
   own writer thread (`GOW_LOG_DIRECT=1` restores the old path). An installation without Visual Studio on a clean PC has
   not been verified yet. `install.cmd -Compiler msvc` keeps the previous build.
+- **Weak PCs (0.4.0):** measured only on a desktop CPU (Core i5-12400F) pinned to fewer cores, never on real low-end
+  hardware. A dual core without SMT holds 60 FPS with no hitches (46.8 FPS with many hitches in 0.3.3), a dual core with
+  SMT (i3/Pentium class) holds 60, and a dual core with cores 1.5-2x slower, approximated by taking CPU time away, runs
+  at 51-55 FPS without hitches. Numbers and method in [`dev/TOASTER_PLAN.md`](dev/TOASTER_PLAN.md).
 - **Coverage of areas:** no systematic play-through validation exists. Zones beyond the ones tested while developing the
   port may still show visual or audio defects.
 

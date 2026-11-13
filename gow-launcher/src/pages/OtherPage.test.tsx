@@ -67,3 +67,60 @@ describe('session report in the failure dialog', () => {
     expect(exported).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('starting the game directly (issue #40)', () => {
+  it('saves the switch', async () => {
+    const user = await openOther();
+    const patched = vi.spyOn(api, 'patchSettings');
+    const toggle = screen.getByRole('switch', { name: 'Start the game directly' });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    await waitFor(() => expect(patched).toHaveBeenCalledWith(expect.objectContaining({ skipLauncher: true })));
+    expect(screen.getByText(/Hold Shift while opening it/)).toBeInTheDocument();
+  });
+
+  it('copies the launcher path for Steam', async () => {
+    const user = await openOther();
+    const written = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: written }, configurable: true });
+    await user.click(screen.getByRole('button', { name: 'Copy path' }));
+    expect(written).toHaveBeenCalledWith(expect.stringContaining('gow-launcher.exe'));
+    expect(await screen.findByText("The launcher's path was copied.")).toBeInTheDocument();
+  });
+
+  it('shows the path when it cannot be copied', async () => {
+    const user = await openOther();
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) }, configurable: true });
+    await user.click(screen.getByRole('button', { name: 'Copy path' }));
+    expect(await screen.findByText(/Could not copy\. The launcher is at .*gow-launcher\.exe/)).toBeInTheDocument();
+  });
+
+  it('shows why the window opened when the game failed after a direct start', async () => {
+    api = createMockApi({
+      ready: true,
+      notice: { finished: { code: -1, failed: true, seconds: 3, summary: 'the last lines', failureKind: null }, launchError: null },
+    });
+    setApi(api);
+    render(<App />);
+    expect(await screen.findByText('The game closed unexpectedly (code -1).')).toBeInTheDocument();
+    expect(screen.getByText('the last lines')).toBeInTheDocument();
+  });
+
+  it('shows a launch error the same way PLAY does', async () => {
+    api = createMockApi({ ready: true, notice: { finished: null, launchError: { key: 'errorInstrumented', detail: 'C:\\gow-2005.exe' } } });
+    setApi(api);
+    render(<App />);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/gow-2005\.exe/)).toBeInTheDocument();
+  });
+
+  it('shows a notice that arrives while the window is open', async () => {
+    api = createMockApi({ ready: true });
+    setApi(api);
+    render(<App />);
+    await screen.findByRole('button', { name: 'PLAY' });
+    act(() => api.emit('start-notice', { finished: { code: 3, failed: true, seconds: 1, summary: '', failureKind: null }, launchError: null }));
+    expect(await screen.findByText('The game closed unexpectedly (code 3).')).toBeInTheDocument();
+  });
+});

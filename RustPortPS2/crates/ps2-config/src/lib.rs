@@ -43,12 +43,40 @@ pub struct Codegen {
     pub register_locals: bool,
     /// COP0 Count reads and writes go to the EE cycle counter (PS2Runtime::eeCountRegister) instead of a frozen field.
     pub cop0_count_clock: bool,
+    /// Generated functions take `R5900Context *__restrict ctx`: guest RAM (`rdram`) never holds the register file, so the
+    /// compiler keeps guest registers in host registers across guest stores (idea from gta-vcs-recomp).
+    pub restrict_ctx: bool,
+    /// `ctx->pc` stored only where something can read it: not before pure ALU / FPU / MMI instructions or RAM accesses
+    /// (those pass their pc to the slow path as `ps2AccessPc`), not around delay slots that read no pc, not before forward
+    /// gotos or dispatched calls. Back edges, device accesses, syscalls and tail calls keep theirs.
+    pub lean_pc: bool,
+    /// With `lean_pc`: VU0 macro-mode instructions (QMFC2, QMTC2, CFC2, CTC2, VADD, VMUL...) lose their pc store too when their
+    /// translation cannot reach the runtime (nothing in them reads `ctx->pc`).
+    pub lean_cop2: bool,
+    /// With `lean_pc`: a delay slot that is also a branch target gets its own label, so the delay-slot entry no longer tests
+    /// `ctx->pc` and functions that have one (a fifth of them, the biggest) are lean as well.
+    pub delay_slot_labels: bool,
+    /// One RAM range check for the accesses of a straight-line run that use the same base register (emit/ramgroup.rs).
+    pub ram_groups: bool,
+    /// VU0 macro-mode fixes from gta-vcs-recomp: VCALLMSR starts at CMSAR0 (PS2Recomp read `vi[27]`, past the 16-entry
+    /// array) and VCLIPw sets the + bit for x > |w| and the - bit for x < -|w| (PS2Recomp swapped them and used w).
+    pub vu0_macro_fixes: bool,
 }
 
 impl Codegen {
     /// The switches `mode = "gow"` turns on.
     pub fn gow() -> Self {
-        Self { movz_low64: true, register_locals: false, cop0_count_clock: true }
+        Self {
+            movz_low64: true,
+            register_locals: false,
+            cop0_count_clock: true,
+            restrict_ctx: true,
+            lean_pc: true,
+            lean_cop2: true,
+            delay_slot_labels: true,
+            ram_groups: true,
+            vu0_macro_fixes: true,
+        }
     }
 
     /// True when every switch is off: the output is PS2Recomp's.
@@ -336,6 +364,24 @@ impl RecompilerConfig {
             if let Some(value) = optional_bool(codegen, "cop0_count_clock") {
                 config.codegen.cop0_count_clock = value;
             }
+            if let Some(value) = optional_bool(codegen, "restrict_ctx") {
+                config.codegen.restrict_ctx = value;
+            }
+            if let Some(value) = optional_bool(codegen, "lean_pc") {
+                config.codegen.lean_pc = value;
+            }
+            if let Some(value) = optional_bool(codegen, "lean_cop2") {
+                config.codegen.lean_cop2 = value;
+            }
+            if let Some(value) = optional_bool(codegen, "delay_slot_labels") {
+                config.codegen.delay_slot_labels = value;
+            }
+            if let Some(value) = optional_bool(codegen, "ram_groups") {
+                config.codegen.ram_groups = value;
+            }
+            if let Some(value) = optional_bool(codegen, "vu0_macro_fixes") {
+                config.codegen.vu0_macro_fixes = value;
+            }
         }
 
         Ok((config, report))
@@ -380,6 +426,12 @@ impl RecompilerConfig {
             codegen.insert("movz_low64".to_owned(), Value::Boolean(self.codegen.movz_low64));
             codegen.insert("register_locals".to_owned(), Value::Boolean(self.codegen.register_locals));
             codegen.insert("cop0_count_clock".to_owned(), Value::Boolean(self.codegen.cop0_count_clock));
+            codegen.insert("restrict_ctx".to_owned(), Value::Boolean(self.codegen.restrict_ctx));
+            codegen.insert("lean_pc".to_owned(), Value::Boolean(self.codegen.lean_pc));
+            codegen.insert("lean_cop2".to_owned(), Value::Boolean(self.codegen.lean_cop2));
+            codegen.insert("delay_slot_labels".to_owned(), Value::Boolean(self.codegen.delay_slot_labels));
+            codegen.insert("ram_groups".to_owned(), Value::Boolean(self.codegen.ram_groups));
+            codegen.insert("vu0_macro_fixes".to_owned(), Value::Boolean(self.codegen.vu0_macro_fixes));
             root.insert("codegen".to_owned(), Value::Table(codegen));
         }
 

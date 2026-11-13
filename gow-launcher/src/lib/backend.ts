@@ -2,9 +2,9 @@
 // in-memory mock stands in, so the interface can be developed and checked without the Tauri shell.
 
 import type {
-  BuildActivity, Bootstrap, DestinationValidation, GameFinished, GameStatus, GamepadCaptured, InstallOutcome,
+  BuildActivity, Bootstrap, CardSlot, SaveArt, SaveBackup, DestinationValidation, GameFinished, GameStatus, GamepadCaptured, InstallOutcome,
   ChdOutcome, ChdPlan, InstallProgress, IsoValidation, LiveState, PatchError, PatchOutcome, OptimizerSnapshot, PadDeviceList, RebuildState, Settings, TexturePackInfo, TexturePackOutcome, TexturePackProgress,
-  UpdateMode, UpdateState, WizardInfo,
+  StartNotice, UpdateMode, UpdateState, WizardInfo,
 } from './types';
 
 export interface EventMap {
@@ -27,6 +27,7 @@ export interface EventMap {
   'texture-pack-done': TexturePackOutcome;
   /** The window was asked to close while a texture pack is installing; it stayed open. */
   'close-blocked': undefined;
+  'start-notice': StartNotice;
   optimizer: OptimizerSnapshot;
   'update-state': UpdateState;
 }
@@ -40,12 +41,23 @@ export interface PickOptions {
 
 export interface Api {
   bootstrap(locale: string): Promise<Bootstrap>;
+  /** The first screen with data is drawn: the backend logs how long the start took (`logs/launcher-startup.log`). */
+  startupReady(scriptMs: number, bootMs: number): Promise<void>;
   patchSettings(patch: Partial<Settings>): Promise<Settings>;
   resetGameOptions(): Promise<Settings>;
   gameStatus(): Promise<GameStatus>;
   detectPaths(force: boolean): Promise<Settings>;
   detectedIso(): Promise<string>;
-  memoryCardDirectory(elf: string): Promise<string>;
+  memoryCardFile(elf: string): Promise<string>;
+  cardSlots(elf: string): Promise<CardSlot[]>;
+  saveBackups(elf: string): Promise<SaveBackup[]>;
+  saveBackupSlots(elf: string, id: string): Promise<CardSlot[]>;
+  backupCardNow(elf: string): Promise<SaveBackup>; // rejects with a message
+  restoreSaveBackup(elf: string, id: string): Promise<void>; // rejects with a message
+  /** Names and thumbnails of the save points from the installed disc (empty without it). */
+  saveArt(points: number[]): Promise<SaveArt>;
+  /** Asks the game for slot `index`; resolves to whether the game is running (if not, the request waits for its start). */
+  loadSaveSlot(elf: string, index: number): Promise<boolean>; // rejects with a message
   startGame(): Promise<void>; // rejects with a LaunchError
   stopGame(): Promise<void>;
   isGameRunning(): Promise<boolean>;
@@ -117,20 +129,31 @@ export interface Api {
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 async function createTauriApi(): Promise<Api> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  const { listen } = await import('@tauri-apps/api/event');
-  const { getCurrentWindow } = await import('@tauri-apps/api/window');
-  const { getCurrentWebview } = await import('@tauri-apps/api/webview');
-  const { open } = await import('@tauri-apps/plugin-dialog');
+  // GOW-Port: fetched together, not one after the other: each is a request to the app's own protocol at start-up.
+  const [{ invoke }, { listen }, { getCurrentWindow }, { getCurrentWebview }, { open }] = await Promise.all([
+    import('@tauri-apps/api/core'),
+    import('@tauri-apps/api/event'),
+    import('@tauri-apps/api/window'),
+    import('@tauri-apps/api/webview'),
+    import('@tauri-apps/plugin-dialog'),
+  ]);
   const call = <T,>(command: string, args?: Record<string, unknown>) => invoke<T>(command, args);
   return {
     bootstrap: (locale) => call('bootstrap', { locale }),
+    startupReady: (scriptMs, bootMs) => call('startup_ready', { scriptMs, bootMs }),
     patchSettings: (patch) => call('patch_settings', { patch }),
     resetGameOptions: () => call('reset_game_options'),
     gameStatus: () => call('game_status'),
     detectPaths: (force) => call('detect_paths', { force }),
     detectedIso: () => call('detected_iso'),
-    memoryCardDirectory: (elf) => call('memory_card_directory', { elf }),
+    memoryCardFile: (elf) => call('memory_card_file', { elf }),
+    cardSlots: (elf) => call('card_slots', { elf }),
+    saveBackups: (elf) => call('save_backups', { elf }),
+    saveBackupSlots: (elf, id) => call('save_backup_slots', { elf, id }),
+    backupCardNow: (elf) => call('backup_card_now', { elf }),
+    restoreSaveBackup: (elf, id) => call('restore_save_backup', { elf, id }),
+    saveArt: (points) => call('save_art', { points }),
+    loadSaveSlot: (elf, index) => call('load_save_slot', { elf, index }),
     startGame: () => call('start_game'),
     stopGame: () => call('stop_game'),
     isGameRunning: () => call('is_game_running'),
@@ -198,9 +221,9 @@ async function createTauriApi(): Promise<Api> {
 export const defaultSettings: Settings = {
   language: '', gpu: 'auto', displayMode: 'fullscreen', widthPx: 1280, heightPx: 800, aspectMode: '', widescreen: true, stretch: false,
   filter: 'bilinear', sharpness: 0.8, fxaa: true, brightness: 50, contrast: 50, gamma: 50, saturation: 50, progressive480p: true, internalResolution: '2', fpsLimit: 60,
-  vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, elf: '', iso: '', executable: '', skipVideos: true, fastBoot: false, customTextures: false, asyncTextures: true,
+  vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, fxShadows: true, fxAdditive: true, fxFilter: true, elf: '', iso: '', executable: '', skipVideos: true, fastBoot: false, customTextures: false, asyncTextures: true,
   settingsVersion: 0, dmc5Controls: false, padButtons: '', padMap: '', padDevice: '', padDeviceName: '', padSdlMap: '', cancelAnimations: true, escQuits: false,
-  minimizeOnPlay: true, secondsPlayed: 0, lastSession: 0, keys: '', cheats: '', cheatsShortcut: '',
+  minimizeOnPlay: true, skipLauncher: false, secondsPlayed: 0, lastSession: 0, keys: '', cheats: '', cheatsShortcut: '',
   retroAchievementsEnabled: false, retroAchievementsUser: '',
   retroAchievementsHardcore: false, retroAchievementsNotifications: true, optimizationDestination: '',
   optimizationEnabled: true, optimizeDuringGame: true, optimizationCompiled: 0,
@@ -289,6 +312,10 @@ export function createMockApi(
     profile?: 'building' | 'training' | 'finishing' | 'leftover';
     /** The demo of a rebuild in progress (`?build=` in a browser), see `demoActivity`. */
     build?: 'working' | 'quiet' | 'stuck';
+    /** The saves on the demo card and what the disc says about them. */
+    saves?: { slots: CardSlot[]; art: SaveArt };
+    /** Why the window opened after a direct start (issue #40). */
+    notice?: StartNotice;
   } = {},
 ): MockApi {
   const ready = options.ready ?? true;
@@ -342,21 +369,31 @@ export function createMockApi(
 
   return {
     emit,
+    startupReady: async () => undefined,
     bootstrap: async () => ({
-      settings, version: '0.3.3', platform: 'windows', display,
+      settings, version: '0.4.0', platform: 'windows', display,
       graphicsCards: [
         { id: 'ahorro', kind: 'integrated', displayName: '', manufacturer: '', driver: '', isDefault: false },
         { id: 'rendimiento', kind: 'dedicated', displayName: '', manufacturer: '', driver: '', isDefault: false },
       ],
       dataDirectory: 'C:\\Users\\player\\AppData\\Roaming\\GOW_PC\\Launcher',
       arguments: { play: false, wizard: false },
+      launcherPath: 'C:\\Users\\player\\AppData\\Local\\God Of War - PC Launcher\\gow-launcher.exe',
+      notice: options.notice ?? null,
     }),
     patchSettings: async (patch) => merge(patch),
-    resetGameOptions: async () => merge({ gpu: 'auto', displayMode: 'fullscreen', filter: 'bilinear', sharpness: 0.8, fxaa: true, brightness: 50, contrast: 50, gamma: 50, saturation: 50, internalResolution: '2', fpsLimit: 60, vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, cheats: '', cheatsShortcut: '' }),
+    resetGameOptions: async () => merge({ gpu: 'auto', displayMode: 'fullscreen', filter: 'bilinear', sharpness: 0.8, fxaa: true, brightness: 50, contrast: 50, gamma: 50, saturation: 50, internalResolution: '2', fpsLimit: 60, vsync: false, showFps: false, showGpu: false, showCpu: false, showRam: false, earlyFinish: true, fxShadows: true, fxAdditive: true, fxFilter: true, cheats: '', cheatsShortcut: '' }),
     gameStatus: async () => status(),
     detectPaths: async () => settings,
     detectedIso: async () => '',
-    memoryCardDirectory: async (elf) => (elf ? elf.replace(/[\\/][^\\/]*$/, '') + '\\mc0' : ''),
+    memoryCardFile: async (elf) => (elf ? elf.replace(/[\\/][^\\/]*$/, '') + '\\Mcd001.ps2' : ''),
+    cardSlots: async () => options.saves?.slots ?? [],
+    saveBackups: async () => [],
+    saveBackupSlots: async () => [],
+    backupCardNow: async () => ({ id: '20260101-000000', created: '2026-01-01T00:00:00', createdUnix: 1767225600, source: 'manual', size: 0 }),
+    restoreSaveBackup: async () => undefined,
+    saveArt: async () => options.saves?.art ?? { places: {}, difficulties: [], thumbnails: {} },
+    loadSaveSlot: async () => running,
     startGame: async () => {
       // The same refusals as `start_game`.
       if (profileStage !== 'none') throw { key: 'errorProfiling', detail: '' };
@@ -538,6 +575,22 @@ function mockUpdateFromAddress(value: string | null): UpdateState {
 
 let instance: Promise<Api> | undefined;
 
+/** The browser demo of the Saves page (`?saves=demo`): made-up places, a drawn thumbnail and one the disc has none for. */
+const demoThumbnail =
+  'data:image/svg+xml;base64,' +
+  btoa(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="80"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
+      '<stop offset="0" stop-color="#7a4a22"/><stop offset="1" stop-color="#e2b46a"/></linearGradient></defs>' +
+      '<rect width="128" height="80" fill="url(#g)"/><circle cx="96" cy="24" r="12" fill="#fff3c4"/></svg>',
+  );
+const demoSaves: { slots: CardSlot[]; art: SaveArt } = {
+  slots: [
+    { index: 0, file: 'data0.bin', modifiedUnix: 1793936917, zone: 'Demo01A', playSeconds: 2902.96, savePoint: 1, difficulty: 0 },
+    { index: 3, file: 'data1.bin', modifiedUnix: 1794513846, zone: 'Demo07C', playSeconds: 15_340, savePoint: 7, difficulty: 2 },
+  ],
+  art: { places: { '1': 'DEMO ALTAR', '7': 'ANOTHER DEMO ALTAR' }, difficulties: ['Easy', 'Normal', 'Hard', 'Very Hard'], thumbnails: { '1': demoThumbnail } },
+};
+
 /** The backend for this environment: Tauri when running inside the app, the mock in a browser. */
 export function getApi(): Promise<Api> {
   instance ??= isTauri
@@ -552,6 +605,7 @@ export function getApi(): Promise<Api> {
           profile: (new URLSearchParams(window.location.search).get('profile') ?? undefined) as
             | 'building' | 'training' | 'finishing' | 'leftover' | undefined,
           build: (new URLSearchParams(window.location.search).get('build') ?? undefined) as 'working' | 'quiet' | 'stuck' | undefined,
+          saves: new URLSearchParams(window.location.search).get('saves') === 'demo' ? demoSaves : undefined,
         }),
       );
   return instance;

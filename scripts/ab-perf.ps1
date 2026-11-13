@@ -3,7 +3,14 @@
 #   scripts\ab-perf.ps1 -ExeA <old gow-2005.exe> -ExeB <new gow-2005.exe> -Elf <SCUS_973.99> -EnvFile <gow-cli env output>
 #                       [-WorkDir <folder>] [-Pairs 4] [-Seconds 150] [-WarmupSeconds 30] [-PadScript '5:start,12:x,...']
 #                       [-Set 'NAME=VALUE', ...] [-SetA 'NAME=VALUE', ...] [-SetB 'NAME=VALUE', ...] [-OutDir <folder>]
-#                       [-Cores 4]
+#                       [-Cores 4 | -AffinityMask 0x5] [-WarmupRunSeconds 90]
+#
+# -WarmupRunSeconds N first runs A for N seconds and discards it (0: none). Without it the first run of a series met a
+# cool machine and was the fastest by far (2 cores: 55-59 FPS against ~40 for the next runs), and it is always variant A.
+#
+# -AffinityMask <hex> pins the game to exactly those logical processors instead of -Cores. With SMT the first N logical
+# processors are N/2 physical cores (Windows numbers the two threads of a core next to each other: on a 6-core/12-thread
+# CPU -Cores 2 is one physical core); 0x5 gives two threads on two different cores, a dual core without SMT.
 #
 # -Cores N pins the game to the first N logical processors, to approximate a weaker PC (the target of most performance
 # work); 0 (the default) leaves the affinity alone.
@@ -36,7 +43,9 @@ param(
     [string[]]$SetA = @(),
     [string[]]$SetB = @(),
     [string]$OutDir = '',
-    [int]$Cores = 0
+    [int]$Cores = 0,
+    [int]$WarmupRunSeconds = 90,
+    [string]$AffinityMask = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -79,6 +88,9 @@ $envSet['GOW_FRAME_DIAG'] = '1'
 if ($PadScript) {
     $envSet['GOW_PAD_TEST'] = '1'
     $envSet['GOW_PAD_SCRIPT'] = $PadScript
+    # The pad test saves a screenshot every 10-20 s by default (gow_pad_test.cpp): each one is a 160-190 ms frame that
+    # players never see and that counted as a hitch. -Set 'GOW_PAD_TEST_NO_CAPTURE=0' brings them back.
+    $envSet['GOW_PAD_TEST_NO_CAPTURE'] = '1'
 }
 function ConvertTo-Pairs([string[]]$items, [string]$parameter) {
     $pairs = [ordered]@{}
@@ -92,6 +104,19 @@ function ConvertTo-Pairs([string[]]$items, [string]$parameter) {
 $common = ConvertTo-Pairs $Set '-Set'
 foreach ($name in $common.Keys) { $envSet[$name] = $common[$name] }
 $variantEnv = @{ A = (ConvertTo-Pairs $SetA '-SetA'); B = (ConvertTo-Pairs $SetB '-SetB') }
+
+# The project never runs above 120 FPS (AGENTS.md): no uncapped runs. They kept the GPU at 100 % until the AMD OpenGL driver
+# crashed, and they measure nothing a player sees.
+foreach ($capped in @($envSet, $variantEnv['A'], $variantEnv['B'])) {
+    # (not $pairs: PowerShell names are case-insensitive, and $Pairs is the [int] parameter)
+    foreach ($name in @('PC_LOGIC_FPS', 'PC_WINDOW_FPS')) {
+        if (-not $capped.Contains($name)) { continue }
+        $value = 0
+        if (-not [int]::TryParse([string]$capped[$name], [ref]$value) -or $value -gt 120 -or ($name -eq 'PC_WINDOW_FPS' -and $value -le 0)) {
+            throw "$name=$($capped[$name]) is above the 120 FPS cap (or unlimited): the project never runs above 120 FPS"
+        }
+    }
+}
 
 # Start-Process in Windows PowerShell 5.1 takes no environment block: the child inherits this process's, so it is set here
 # for the run and restored afterwards.
@@ -107,7 +132,8 @@ function Invoke-Run([string]$label, [string]$exe, [int]$index) {
         Write-Host ("[{0}] run {1} ({2}): {3} s" -f (Get-Date -Format 'HH:mm:ss'), $index, $label, $Seconds)
         $process = Start-Process -FilePath $exe -ArgumentList ('"' + $Elf + '"') -WorkingDirectory $WorkDir -PassThru `
             -RedirectStandardError $log -RedirectStandardOutput ($log + '.out')
-        if ($Cores -gt 0) { $process.ProcessorAffinity = [IntPtr]([int64](1 -shl $Cores) - 1) }
+        if ($AffinityMask) { $process.ProcessorAffinity = [IntPtr]([Convert]::ToInt64($AffinityMask.Replace('0x', ''), 16)) }
+        elseif ($Cores -gt 0) { $process.ProcessorAffinity = [IntPtr]([int64](1 -shl $Cores) - 1) }
     }
     finally {
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
@@ -177,6 +203,13 @@ Write-Host "B: $ExeB $(($variantEnv.B.Keys | ForEach-Object { "$_=$($variantEnv.
 Write-Host "Logs: $OutDir"
 $results = New-Object System.Collections.Generic.List[object]
 $index = 0
+if ($WarmupRunSeconds -gt 0) {
+    # Warms the machine up like the runs that follow; its numbers are not used.
+    $measured = $Seconds
+    $Seconds = $WarmupRunSeconds
+    [void](Invoke-Run 'A' $ExeA 0)
+    $Seconds = $measured
+}
 for ($pair = 0; $pair -lt $Pairs; $pair++) {
     # A B, then B A, so neither variant always runs on a cooler or warmer machine.
     $order = if ($pair % 2 -eq 0) { @('A', 'B') } else { @('B', 'A') }

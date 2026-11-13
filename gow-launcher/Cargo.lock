@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "fake-runner"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "gow-core",
  "tempfile",
@@ -1457,7 +1457,7 @@ dependencies = [
 
 [[package]]
 name = "gow-cli"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "gow-core",
  "serde_json",
@@ -1465,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "gow-core"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "gow-launcher"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "gow-core",
  "serde",
@@ -2931,15 +2931,15 @@ dependencies = [
 
 [[package]]
 name = "ps2-elf"
-version = "0.3.3"
+version = "0.4.0"
 
 [[package]]
 name = "ps2-parity"
-version = "0.3.3"
+version = "0.4.0"
 
 [[package]]
 name = "ps2-tools"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "lzma-rs",
  "miniz_oxide 0.8.9",

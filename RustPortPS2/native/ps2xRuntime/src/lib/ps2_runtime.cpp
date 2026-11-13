@@ -43,6 +43,26 @@ static void gowPgoSignalHandler(int) { g_pgoStopSignal = 1; }
 #include <chrono>
 #include <atomic>
 #include <thread>
+#include <bit>
+
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+extern "C"
+{
+    __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
+    __declspec(dllimport) int __stdcall GetProcessAffinityMask(void *process, unsigned long long *processMask, unsigned long long *systemMask);
+}
+#endif
+
+// GOW-Port: logical processors this process may run on (its affinity mask on Windows, so a run pinned with -Cores counts).
+static unsigned gowUsableProcessors()
+{
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+    unsigned long long process = 0, system = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0)
+        return static_cast<unsigned>(std::popcount(process));
+#endif
+    return std::max(1u, std::thread::hardware_concurrency());
+}
 #include <unordered_map>
 #include <sstream>
 #include <cstdio>
@@ -55,6 +75,9 @@ std::atomic<uint64_t> g_gowAudioFramesProduced{0};
 // GOW-Port: funciones de PC Port (gow_integration.cpp).
 void gowWindowOpen(const char *title);
 int gowWindowFps();
+bool gowVsyncEnabled();
+bool gowVsyncOnWindow(); // GOW-Port: the VSync the window really uses (only on a display at 120 Hz or less)
+int gowWindowTargetFps(); // GOW-Port: the window timer's rate (0 when the game's VBlank paces the loop)
 void gowIntegrationInstall(PS2Runtime &runtime, const std::string &elfPath);
 void gowFrameInput();
 
@@ -72,8 +95,12 @@ static bool hostSyncToVBlank()
     }();
     if (!on)
         return false;
-    const char *vsync = std::getenv("PC_VSYNC");
-    return !(vsync && *vsync && *vsync != '0') && gowWindowFps() == 60;
+    return !gowVsyncOnWindow() && gowWindowFps() == 60; // GOW-Port: VSync can be switched in game, and is not used above 120 Hz (gow_integration.cpp)
+}
+
+bool gowHostSyncToVBlank()
+{
+    return hostSyncToVBlank();
 }
 
 bool ps2AudioOpenNamedDevice(void (*fill)(void *, unsigned int), unsigned int sampleRate); // ps2_audio_device.cpp
@@ -248,9 +275,8 @@ namespace
     };
 
     thread_local DispatchHistory g_dispatchHistory;
-    // GOW-Port: counts the jumps (not calls) dispatched, to tell an implicit return from a final jump
-    // that goes back to the entry of the called function (SotC fork, c4c20e8).
-    thread_local uint64_t g_guestJumpSerial = 0u;
+    // GOW-Port: g_guestJumpSerial moved out of this namespace (declared in ps2_runtime.h): the inline call fast path
+    // of dispatchGuestBranch reads it too.
 
     bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
     {
@@ -651,8 +677,26 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
     // (the perf scope reads the host clock twice, which was ~40 % of the EE thread with GOW_PERF_DIAG=1).
     if (!m_iopSubsystem->accrueEeCycles(eeCycles))
         return;
-    ps2_perf::Scope perf(ps2_perf::Bucket::Iop);
-    m_iopSubsystem->runPendingEeCycles();
+    // GOW-Port: with GOW_PERF_DIAG=1 (which the launcher always sets) a scope per batch read the clock twice at ~70 k
+    // batches/s. One batch in kIopPerfSample is timed (scope + two reads) and its time is scaled to the others, moved
+    // from the enclosing bucket to Iop, so the report keeps its meaning with a fraction of the clock reads.
+    constexpr uint32_t kIopPerfSample = 8u;
+    thread_local uint32_t batchCounter = 0u;
+    if (!ps2_perf::enabled() || (++batchCounter % kIopPerfSample) != 0u)
+    {
+        m_iopSubsystem->runPendingEeCycles();
+        return;
+    }
+    const ps2_perf::Bucket enclosing = ps2_perf::accounting.active;
+    const uint64_t start = ps2_perf::nowNanos();
+    {
+        ps2_perf::Scope perf(ps2_perf::Bucket::Iop);
+        m_iopSubsystem->runPendingEeCycles();
+    }
+    const uint64_t extra = (ps2_perf::nowNanos() - start) * (kIopPerfSample - 1u);
+    ps2_perf::nanos[static_cast<size_t>(ps2_perf::Bucket::Iop)].fetch_add(extra, std::memory_order_relaxed);
+    if (enclosing != ps2_perf::Bucket::None)
+        ps2_perf::nanos[static_cast<size_t>(enclosing)].fetch_sub(extra, std::memory_order_relaxed);
 }
 
 uint64_t PS2Runtime::iopEeCyclesUntilBatch() const noexcept
@@ -735,12 +779,23 @@ bool PS2Runtime::syncCoreSubsystems()
     // GOW-Port: each stream keeps its GIF cursor, even when another PATH interrupts it.
     m_gifArbiter.reset();
     // GOW-Port: with the GS worker, the GS frontend runs on its own stage thread behind VU1 (gs_stage.h).
+    // GOW-Port: by default the stage thread only runs where the process has a core for it (4 or more usable processors).
+    // On 2 cores, at 60 FPS with the launcher's environment (3 alternating pairs after a warm-up run), the frontend on the
+    // worker itself gave 52.6 -> 53.6 FPS, worst 5 s window 38.9 -> 40.7 and frames over 50 ms 72 -> 14: one heavy thread
+    // less to share two cores. PS2X_GS_PIPELINE=0/1 forces it.
     static const bool gsPipeline = []
     {
         const char *worker = std::getenv("PS2X_GS_WORKER");
         const char *pipeline = std::getenv("PS2X_GS_PIPELINE");
-        return worker && worker[0] == '1' && !(pipeline && pipeline[0] == '0');
+        if (!(worker && worker[0] == '1'))
+            return false;
+        if (pipeline && pipeline[0] != ' ')
+            return pipeline[0] != '0';
+        return gowUsableProcessors() >= 4u;
     }();
+    if (!gsPipeline) // GOW-Port: the markers PS2Memory pushes go straight to the frontend (gs_stage.h)
+        ps2_gs_stage::setDirect([this](GifPathId path, const uint8_t *data, uint32_t size)
+                                { m_gs.processGIFPacket(data, size, path); });
     if (gsPipeline)
         ps2_gs_stage::start([this](GifPathId path, const uint8_t *data, uint32_t size)
                             { m_gs.processGIFPacket(data, size, path); },
@@ -875,7 +930,7 @@ bool PS2Runtime::initialize(const char *title)
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         startSpu2Audio(m_iopSubsystem.get()); // GOW-Port
-        SetTargetFPS(hostSyncToVBlank() ? 0 : gowWindowFps()); // GOW-Port: PC_WINDOW_FPS (60 by default); with GOW_SYNC_VBLANK the game's VBlank sets the pace
+        SetTargetFPS(gowWindowTargetFps()); // GOW-Port: PC_WINDOW_FPS (60 by default); with GOW_SYNC_VBLANK the game's VBlank sets the pace, with VSync the display does
         if (m_debugUiInitCallback)
         {
             m_debugUiInitCallback(*this, m_debugUiUserData);
@@ -1513,9 +1568,30 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
-// GOW-Port branch trace ring
-struct GowBranchRec { uint32_t src, dst, ra, kind; };
+// GOW-Port branch trace ring (GowBranchRec in ps2_runtime.h: the inline call fast path writes it too)
 GowBranchRec g_gowRing[256]; std::atomic<uint32_t> g_gowRingPos{0};
+
+// GOW-Port: counts the jumps (not calls) dispatched, to tell an implicit return from a final jump
+// that goes back to the entry of the called function (SotC fork, c4c20e8).
+thread_local uint64_t g_guestJumpSerial = 0u;
+
+// GOW-Port: the inline call fast path of dispatchGuestBranch (ps2_runtime.h). Off with GOW_FAST_DISPATCH=0, and while
+// a diagnostic that needs every guest entry is on (GOW_GAP_DIAG, PS2X_GS_WORKER_TRACE). Calls to the frame function
+// (GOW_PERF_FRAME_PC) always take the slow path, which counts them for GOW_PERF_DIAG / GOW_FRAME_DIAG.
+bool g_ps2DispatchFast = [] {
+    const char *off = std::getenv("GOW_FAST_DISPATCH");
+    if (off && off[0] == '0')
+        return false;
+    const char *gap = std::getenv("GOW_GAP_DIAG");
+    if (gap && std::atof(gap) > 0.0)
+        return false;
+    return std::getenv("PS2X_GS_WORKER_TRACE") == nullptr;
+}();
+static_assert(kGuestDispatchCyclesInline == EeScheduler::kGuestDispatchCycles, "inline dispatch charges what the slow path does");
+uint32_t g_ps2DispatchWatchPc = [] {
+    const char *value = std::getenv("GOW_PERF_FRAME_PC");
+    return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 0xFFFFFFFFu;
+}();
 void gowDumpBranchRing(const char *why)
 {
     uint32_t pos = g_gowRingPos.load();
@@ -1526,7 +1602,7 @@ void gowDumpBranchRing(const char *why)
         std::fprintf(stderr, "  src=%08x dst=%08x ra=%08x kind=%u\n", r.src, r.dst, r.ra, r.kind);
     }
 }
-bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+bool PS2Runtime::dispatchGuestBranchSlow(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
                                      uint32_t sourcePc,
@@ -1561,7 +1637,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
-    if (!hasFunction(targetPc))
+    // GOW-Port: one table read for the existence check and the lookup (hasFunction + lookupFunction read it twice);
+    // lookupFunction's dispatch-history push is kept below, so the history is the same.
+    uint32_t targetSlot = 0u;
+    RecompiledFunction targetFn =
+        generatedFunctionTableSlot(targetPc, targetSlot) ? g_ps2RecompiledFunctionTable[targetSlot] : nullptr;
+    if (targetFn == nullptr)
     {
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
 
@@ -1569,6 +1650,22 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
         if (policy == MissingFunctionPolicy::SkipCallDebug && isCall)
         {
+            // GOW-Port: the game runs with this policy (gow_overrides.cpp). Leaving ctx->pc on a target that is not
+            // a function unwinds every caller and the main thread goes dormant: the picture freezes for good
+            // (issue #20: JALR to 0 at 0x149390 through a NULL UI timeline node; issue #37: JALR to 0x308B527B at
+            // 0x1D6D44). The call is skipped as if the callee had returned 0. reportMissingFunction prints the
+            // registers of the first one only, so each one is logged here, the first three with the last branches.
+            static unsigned skipped = 0;
+            if (skipped < 50u)
+            {
+                ++skipped;
+                std::fprintf(stderr, "[gow-badcall] call to 0x%x at 0x%x skipped (a0=0x%x ra=0x%x)\n", targetPc, sourcePc,
+                             static_cast<uint32_t>(_mm_cvtsi128_si32(ctx->r[4])),
+                             static_cast<uint32_t>(_mm_cvtsi128_si32(ctx->r[31])));
+                if (skipped <= 3u)
+                    gowDumpBranchRing("call to a missing function skipped");
+            }
+            ctx->r[2] = _mm_setzero_si128();
             ctx->pc = fallthroughPc;
             return true;
         }
@@ -1583,7 +1680,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
-    RecompiledFunction targetFn = lookupFunction(targetPc);
+    pushDispatchPc(targetPc);
     const uint32_t entryPc = ctx->pc;
     const uint64_t checkpointSerial = m_eeCheckpointSerial;
     const uint64_t jumpSerial = g_guestJumpSerial;
@@ -2774,3 +2871,68 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("[run] exiting loop");
 }
+
+// GOW-Port: the out-of-line half of the guest load / store macros (ps2_runtime_macros.h): every address the inline
+// RAM / scratchpad test did not take, handled as the macros did before - the device path for special addresses (with
+// the access's pc in ctx->pc when the generated code passed one), the masked RAM access for the rest.
+namespace
+{
+    template <typename T>
+    inline T ps2SlowLoadRam(const uint8_t *rdram, uint32_t addr)
+    {
+        if constexpr (sizeof(T) == 1)
+            return Ps2FastRead8(rdram, addr);
+        else if constexpr (sizeof(T) == 2)
+            return Ps2FastRead16(rdram, addr);
+        else if constexpr (sizeof(T) == 4)
+            return Ps2FastRead32(rdram, addr);
+        else if constexpr (sizeof(T) == 8)
+            return Ps2FastRead64(rdram, addr);
+        else
+            return Ps2FastRead128(rdram, addr);
+    }
+
+    template <typename T>
+    inline void ps2SlowStoreRam(uint8_t *rdram, uint32_t addr, T value)
+    {
+        if constexpr (sizeof(T) == 1)
+            Ps2FastWrite8(rdram, addr, value);
+        else if constexpr (sizeof(T) == 2)
+            Ps2FastWrite16(rdram, addr, value);
+        else if constexpr (sizeof(T) == 4)
+            Ps2FastWrite32(rdram, addr, value);
+        else if constexpr (sizeof(T) == 8)
+            Ps2FastWrite64(rdram, addr, value);
+        else
+            Ps2FastWrite128(rdram, addr, value);
+    }
+}
+
+#define GOW_DEFINE_SLOW_ACCESS(T, N)                                                                                   \
+    T Ps2ReadSlow##N(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, uint32_t accessPc)       \
+    {                                                                                                                \
+        if (!PS2Runtime::isSpecialAddress(addr))                                                                     \
+            return ps2SlowLoadRam<T>(rdram, addr);                                                                   \
+        if (accessPc != 0u)                                                                                          \
+            ctx->pc = accessPc;                                                                                      \
+        return runtime->Load##N(rdram, ctx, addr);                                                                   \
+    }                                                                                                                \
+    void Ps2WriteSlow##N(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, T value,             \
+                         uint32_t accessPc)                                                                          \
+    {                                                                                                                \
+        if (!PS2Runtime::isSpecialAddress(addr))                                                                     \
+        {                                                                                                            \
+            ps2SlowStoreRam<T>(rdram, addr, value);                                                                  \
+            return;                                                                                                  \
+        }                                                                                                            \
+        if (accessPc != 0u)                                                                                          \
+            ctx->pc = accessPc;                                                                                      \
+        runtime->Store##N(rdram, ctx, addr, value);                                                                  \
+    }
+
+GOW_DEFINE_SLOW_ACCESS(uint8_t, 8)
+GOW_DEFINE_SLOW_ACCESS(uint16_t, 16)
+GOW_DEFINE_SLOW_ACCESS(uint32_t, 32)
+GOW_DEFINE_SLOW_ACCESS(uint64_t, 64)
+GOW_DEFINE_SLOW_ACCESS(__m128i, 128)
+#undef GOW_DEFINE_SLOW_ACCESS

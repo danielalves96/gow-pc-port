@@ -13,6 +13,7 @@ what to attach.
 | Optimization | `logs/optimize.log` in the launcher's data folder |
 | Recompilation | `build-gen/recomp.log` |
 | Optimization when run by an installer | `build-gen/optimize.log` |
+| How long the launcher took to open | `logs/launcher-startup.log` in the launcher's data folder: `setup` is the work before the window, `page script` WebView2 and the interface |
 
 The game log is plain text. Lines starting with `[gow-`, `[gs`, `[vu1` and `[iop` are the useful ones.
 
@@ -20,6 +21,7 @@ The game log is plain text. Lines starting with `[gow-`, `[gs`, `[vu1` and `[iop
 
 | Symptom | Cause / fix |
 |---|---|
+| `Could not download ...` (Git, CMake, Ninja, the compiler or the Build Tools installer) | Since 0.4.0 each download is tried four ways in turn (`Invoke-WebRequest`, .NET's `HttpClient`, Windows' `curl.exe`, BITS) and the log says what each one answered. Issue #39 was `Invoke-WebRequest` failing with "The system cannot find the file specified" on a PC whose Internet worked, which ended the installation for every tool. When every way fails, the error names the address and the exact path: download the file with a browser, save it under that name and run the installation again; it is checked by SHA-256 and used as it is |
 | "God of War ISO not found" | Put the ISO in `game/` or pass the path (`install.cmd -Iso ...`, `./install.sh "/path/file.iso"`). Only the **USA** disc (`SCUS-97399`) works |
 | The wizard rejects the ISO | It must be the USA disc (`SCUS-97399`) or a disc modified without changing the game's code (a translation, an undub, a data mod). Other regions and demos are named but not supported yet; discs whose executable changed are refused. An `.xdelta` patch is applied in the wizard itself: choose the original ISO and tick **Apply a patch (.xdelta)** (see [Modified discs, patches and other editions](INSTALL.md#modified-discs-patches-and-other-editions)) |
 | The wizard says a `.chd` cannot be read | Only complete CHDs of version 5 (every `chdman` since 2012) are read. An older CHD, or a delta CHD that needs its parent, can be turned into a complete one with `chdman copy -i old.chd -o new.chd`, or extracted to an ISO with `chdman extractcd` / `extractdvd` and chosen as an ISO. "Damaged" means a block does not match its checksum: copy or download the CHD again |
@@ -55,6 +57,8 @@ The game log is plain text. Lines starting with `[gow-`, `[gs`, `[vu1` and `[iop
 | Symptom | Cause / fix |
 |---|---|
 | Launcher says the game files are missing | **Files → Find files automatically**, or set `SCUS_973.99` and `gow-2005` by hand |
+| The launcher takes many seconds to open | Before 0.4.0 it counted the optimizer's captured microprograms (`vu1_captures/`, hundreds of thousands of files after long play) before showing its window, asking Windows about each file: 14 to 30 s on a development PC with 414,000 of them. It now counts on another thread, from the folder listing alone, and only again when the folder changed: the window was ready in 0.4 s on the same PC. If it is still slow, `logs/launcher-startup.log` says where the time went |
+| Opening the launcher starts the game and the window never shows | **Start the game directly** is on (Other tab). Hold Shift while opening the launcher, or start it with `--launcher`, to get the window |
 | "ELF does not match this build" | The runner was built for another ELF (or the file changed). Rebuild, or set the runner the build produced |
 | Illegal instruction, or the game closes at startup with no message, on an old CPU | The game needs a CPU with SSE4.1 (Intel Core 2 "Penryn", 2008, or newer; AMD "Bulldozer", 2011, or newer). The installer checks it, so this usually means the check was skipped or the game was copied to another PC. There is no workaround: the instructions are used by the generated code itself |
 | The error dialog says the graphics driver could not provide the OpenGL context (the log has `core context unavailable`) | Update the graphics driver. A remote desktop session and the Microsoft Basic Display Adapter cannot run the game; play on the PC itself with the GPU's own driver |
@@ -76,8 +80,8 @@ The game log is plain text. Lines starting with `[gow-`, `[gs`, `[vu1` and `[iop
 | Speech or music slightly slower or faster for a moment | Expected: when the frame rate drops, the audio is stretched (pitch kept, at most 15 % slower) instead of cutting to silence, and it returns to normal speed once the buffer refills. `GOW_AUDIO_STRETCH=0` turns this off for comparison; `GOW_AUDIO_STATS=1` logs the buffer level and tempo |
 | Sound too quiet compared with 0.2.x | Since 0.3.0 the game's sound is 4 dB lower, so fights no longer sound blown out (the mix went over full scale and the limiter cut it in half). Raise the system volume, or set `GOW_AUDIO_GAIN_DB=0` for the old level |
 | No audio device | `GOW_AUDIO_DEVICE=default` picks the system default; set another device name if you have several |
-| Window stutters while the FPS number is fine | Disable VSync (not recommended for this game); with an experimental FPS limit (120 or 240), go back to 60 |
-| Something timed feels off at 120 or 240 FPS (a QTE, a combo, a jump) | The higher FPS limits are experimental: set **Performance → FPS limit** back to 60 and report the scene |
+| Window stutters while the FPS number is fine | Disable VSync (not recommended for this game); with the 120 FPS limit, go back to 60 |
+| Something timed feels off at 120 FPS (a QTE, a combo, a jump) | Actions timed in frames are not fully verified at 120: set **Performance → FPS limit** back to 60 and report the scene |
 
 ## Saves and the memory card
 
@@ -87,7 +91,10 @@ The game log is plain text. Lines starting with `[gow-`, `[gs`, `[vu1` and `[iop
 | My PCSX2 saves are not listed | The file must be a PCSX2 card image named `Mcd001.ps2` next to the executable, or point `GOW_MC0` at it |
 | The save does not appear in PCSX2 | Copy the whole `Mcd001.ps2` out of `game/`; do not copy parts of it |
 | **The game hangs right after saving** | A known open problem on Windows. Note the area and what you did, then attach `logs/last.log` and the `gow_hang_*.sampling` files next to it. If the hang report has `[gow-hang] animation step loop` and `animation controller` lines, those values are what is needed to fix it |
+| **The game closes or stops responding and `last.log` just ends** | Since 0.4.0 a crash leaves a `[gow-crash]` line at the end of `last.log` (the exception code and a place such as `gow-2005.exe+0x...`), after `[gow-trace]` lines with the last game branches. Use **Mark a problem** with what you were doing and attach the report. A log that still ends with neither line usually means the process was closed from outside (Task Manager, the PC shutting down); say so in the report if you did |
 | **The picture freezes and `last.log` says `the game has not entered the frame function for 5 s`** | Two different things trigger that line. During a cutscene it is a false alarm (the movie player does not use the frame function; fixed in 0.2.9: no line while a movie plays). Outside a movie it is a real freeze: the lines `[gow-hang] gs_done_flag=... csr=... imr=...` that follow say what the game waits for (a `gs_done_flag` of 1 with `csr` bit 1 clear or set tells a lost FINISH from an undelivered interrupt) and `[gow-gs-irq]` lines say when the port had to deliver the GS interrupt again. Attach `logs/last.log` and the `gow_hang_*.sampling` files next to it |
+| **`last.log` has `[gow-badcall]` lines, or the picture freezes after a `[guest-branch:missing-target]` line** | The game called a function through a bad pointer. Before 0.4.0 that froze the picture for good (`[gow-trace] main thread dormant`); since 0.4.0 the call is skipped and the game goes on, possibly with something missing on screen. Use **Mark a problem**, say where in the game it happened and attach the report: the `[gow-badcall]` and `[gow-trace]` lines are what is needed to fix the cause |
+| **Blocky or stale textures after saving, until the game is restarted** | `last.log` shows `[vif1] unhandled VIFcode` lines right after `[memory card] backup kept`: a VU1 command stream lost its alignment, and texture uploads queued behind it could stay there. Since 0.4.0 they are released (`[vif1] stream fault with PATH3 masked`), and the first faults print `[vif1] history` and `[vif1] word` lines, which are what is needed to fix the cause. Attach `logs/last.log` |
 | Save does not survive a reinstall | `game/` is deleted on a clean reinstall. Back up `Mcd001.ps2` |
 
 ## Controls and features

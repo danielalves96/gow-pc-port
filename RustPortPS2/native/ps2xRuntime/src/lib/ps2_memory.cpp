@@ -256,6 +256,10 @@ static inline uint32_t gs_vram_offset(uint32_t basePage, uint32_t x, uint32_t y,
     return basePage * 2048 + y * strideBytes + x * 4;
 }
 
+// GOW-Port: the memory of the running game, for gowEarlyFinishSet() (the Frame Rate page of the menus).
+static PS2Memory *g_gowMemory = nullptr;
+static bool g_gowWorkerOn = false;
+
 PS2Memory::PS2Memory()
     : m_rdram(nullptr), m_scratchpad(nullptr), iop_ram(nullptr), m_seenGifCopy(false), m_gsVRAM(nullptr)
 {
@@ -268,6 +272,8 @@ PS2Memory::PS2Memory()
     // come back in ~40 level and warp loads, also on 4 cores; GOW_LOADER_DIAG=1 reports the loader if it ever does.
     const char *earlyFinish = std::getenv("GOW_GS_EARLY_FINISH");
     m_gsEarlyFinish = m_gsWorkerEnabled && !(earlyFinish && earlyFinish[0] == '0');
+    g_gowMemory = this;
+    g_gowWorkerOn = m_gsWorkerEnabled;
     if (m_gsWorkerEnabled)
     {
         std::fprintf(stderr, "[gs-worker] early FINISH %s (GOW_GS_EARLY_FINISH)\n", m_gsEarlyFinish ? "on" : "off");
@@ -279,6 +285,8 @@ PS2Memory::PS2Memory()
 
 PS2Memory::~PS2Memory()
 {
+    if (g_gowMemory == this)
+        g_gowMemory = nullptr;
     stopGsWorker();
     if (m_rdram)
     {
@@ -2285,6 +2293,34 @@ void PS2Memory::syncGsWorker(const char *site)
         waitGsWorkerIdle(site, 0u);
 }
 
+void PS2Memory::setGsEarlyFinish(bool enabled)
+{
+    if (!m_gsWorkerEnabled || m_gsEarlyFinish.load(std::memory_order_relaxed) == enabled)
+        return;
+    // Everything queued under the old rule runs to its end first (a job queued with early FINISH has had its FINISH raised and
+    // its own FINISH writes skipped; one queued without it raises its FINISH when the worker ends it).
+    waitGsWorkerIdle("early FINISH switch", 0u);
+    m_gsEarlyFinish.store(enabled, std::memory_order_relaxed);
+    std::fprintf(stderr, "[gs-worker] early FINISH %s (changed in game)\n", enabled ? "on" : "off");
+}
+
+// GOW-Port: gow_frame (lib/gow_integration.cpp) asks for the switch; false when there is no GS worker (nothing to switch).
+bool gowEarlyFinishAvailable()
+{
+    return g_gowMemory && g_gowWorkerOn;
+}
+
+bool gowEarlyFinishGet()
+{
+    return g_gowMemory && g_gowMemory->gsEarlyFinish();
+}
+
+void gowEarlyFinishSet(bool enabled)
+{
+    if (g_gowMemory)
+        g_gowMemory->setGsEarlyFinish(enabled);
+}
+
 void PS2Memory::syncGsWorkerFor(uint32_t address)
 {
     if (ps2_gs_stage::onStageThread())
@@ -2339,13 +2375,15 @@ void PS2Memory::waitGsWorkerIdle(const char *site, uint32_t address)
 {
     std::unique_lock<std::mutex> lock(m_gsWorkerMutex);
     const bool busy = !m_gsWorkerJobs.empty() || m_gsWorkerBusy;
-    const auto start = std::chrono::steady_clock::now();
+    // GOW-Port: the clock reads only feed PS2X_GS_WORKER_DIAG; this runs at every GS register sync from the EE.
+    const bool diagOn = gsWorkerSyncDiagEnabled();
+    const auto start = diagOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (busy)
         m_gsWorkerIdleCv.wait(lock, [this] { return m_gsWorkerJobs.empty() && !m_gsWorkerBusy; });
     lock.unlock();
-    const auto workerDone = std::chrono::steady_clock::now();
+    const auto workerDone = diagOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const bool stageWaited = ps2_gs_stage::waitIdle(); // GOW-Port: the GS frontend stage is part of the worker (gs_stage.h)
-    if (!gsWorkerSyncDiagEnabled())
+    if (!diagOn)
         return;
     static GsWorkerSyncDiag diag;
     const auto now = std::chrono::steady_clock::now();

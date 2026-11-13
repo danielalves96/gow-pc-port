@@ -30,6 +30,10 @@ export interface Settings {
   showCpu: boolean;
   showRam: boolean;
   earlyFinish: boolean;
+  /** Effect switches for weak GPUs: character shadows (`GOW_FX_SHADOWS`), additive 3D effects (`GOW_FX_ADDITIVE`), texture filtering (`GOW_FX_FILTER`). */
+  fxShadows: boolean;
+  fxAdditive: boolean;
+  fxFilter: boolean;
   elf: string;
   iso: string;
   executable: string;
@@ -51,6 +55,8 @@ export interface Settings {
   cancelAnimations: boolean;
   escQuits: boolean;
   minimizeOnPlay: boolean;
+  /** Opening the launcher opens the game without the window (Shift or `--launcher` shows it). */
+  skipLauncher: boolean;
   secondsPlayed: number;
   lastSession: number;
   keys: string;
@@ -135,6 +141,15 @@ export interface Bootstrap {
   graphicsCards: GraphicsCard[];
   dataDirectory: string;
   arguments: { play: boolean; wizard: boolean };
+  /** The launcher's own executable (for Steam's "Add a Non-Steam Game"). */
+  launcherPath: string;
+  /** Why the window opened after a direct start (issue #40): the game failed to start, or started and closed with an error. */
+  notice: StartNotice | null;
+}
+
+export interface StartNotice {
+  finished: GameFinished | null;
+  launchError: LaunchError | null;
 }
 
 export interface GameState {
@@ -153,6 +168,42 @@ export interface ExecutableState {
   exists: boolean;
   executable: boolean;
 }
+/** One save of the memory card (or of a backup), as the game lists it. */
+export interface CardSlot {
+  index: number;
+  file: string;
+  /** Seconds since 1970 (UTC). */
+  modifiedUnix: number;
+  /** The zone code the save stands in (`Athn02C`). */
+  zone: string;
+  /** Play time in seconds. */
+  playSeconds: number;
+  /** The altar the save was made at (0 when unknown): names the place and the thumbnail in `SaveArt`. */
+  savePoint: number;
+  /** 0 to 3, easiest first. */
+  difficulty: number;
+}
+
+/** Names and thumbnails from the player's installed disc (`gow_core::save_art::SaveArt`); empty without it. */
+export interface SaveArt {
+  /** Save point -> name, as the game writes it. */
+  places: Record<string, string>;
+  /** Difficulty 0..3 -> name. */
+  difficulties: string[];
+  /** Save point -> `data:image/png;base64,...`. */
+  thumbnails: Record<string, string>;
+}
+
+/** A dated copy of the card the game made at an altar, or the player asked for. */
+export interface SaveBackup {
+  id: string;
+  created: string;
+  createdUnix: number;
+  /** `auto`, `manual` or `before-restore`. */
+  source: string;
+  size: number;
+}
+
 export interface GameStatus {
   game: GameState;
   data: DataState;

@@ -14,12 +14,16 @@ use crate::settings::Settings;
 /// Variables of Waffle565's runtime (`run_gow.sh`): VIF1/VU1/GIF on the GS thread,
 /// asynchronous FINISH, sound on the default stream and the `[gow-perf]` line every 5 s. A variable that is already
 /// in the user's environment is respected, so comparisons can be made without touching the launcher.
-const BASE_ENVIRONMENT: [(&str, &str); 5] = [
+/// `GOW_NATIVE_CHEATS_MENU=1`: the Port Options entry (with Cheats) of the game's own pause menu (docs/dev/NATIVE_MENU_RESEARCH.md). The runtime
+/// leaves the stock menu alone when cheats are unavailable (RetroAchievements Hardcore) or the data is not the retail game, and
+/// `GOW_NATIVE_CHEATS_MENU=0` in the user's environment turns it off.
+const BASE_ENVIRONMENT: [(&str, &str); 6] = [
     ("PS2X_GS_WORKER", "1"),
     ("GOW_GS_FINISH_ASYNC", "1"),
     ("GOW_AUDIO_DEVICE", "default"),
     ("GOW_PERF_DIAG", "1"),
     ("GOW_PERF_FRAME_PC", "0x001837B8"),
+    ("GOW_NATIVE_CHEATS_MENU", "1"),
 ];
 
 /// What `start` needs besides the settings.
@@ -133,12 +137,16 @@ pub fn validate(settings: &Settings) -> Result<(), LaunchError> {
     Ok(())
 }
 
-/// The FPS limits the launcher offers (60 native, 120 and 240 experimental); any stored value snaps to the nearest one.
+/// The highest frame rate the project runs the game or its window at (AGENTS.md): above it nothing gets smoother on a weak
+/// PC, and the uncapped rates kept the GPU at 100 % until the AMD OpenGL driver crashed. The runtime has the same cap
+/// (`kMaxFps`, ps2xRuntime/src/lib/gow_frame.h).
+pub const MAX_FPS: u32 = 120;
+
+/// The FPS limits the launcher offers (60 native, 120); any stored value snaps to the nearest one, never above `MAX_FPS`.
 pub fn fps_limit(stored: i32) -> u32 {
     match stored {
         i32::MIN..=90 => 60,
-        91..=180 => 120,
-        _ => 240,
+        _ => MAX_FPS,
     }
 }
 
@@ -280,19 +288,25 @@ pub fn build_environment(ctx: &LaunchContext<'_>, inherited: impl Fn(&str) -> Op
     }
     // Internal GS resolution, 1..8 (recommended 2x; from 3x up it needs a strong GPU, and the runtime keeps the render
     // targets within the GPU's texture limit).
-    let scale = ctx.scale.clamp(1.0, crate::settings::MAX_SCALE);
-    plan.insert("PS2X_GS_SCALE", fixed(scale, 1));
-    plan.insert("PS2X_GS_HW_SCALE", fixed(scale, 1)); // Waffle's renderer reads the scale from here
+    // Below 1x (down to a quarter) the game is drawn smaller than the PS2 and stretched to the window: integrated GPUs.
+    let scale = ctx.scale.clamp(crate::settings::MIN_SCALE, crate::settings::MAX_SCALE);
+    let digits = if scale < 1.0 { 2 } else { 1 };
+    plan.insert("PS2X_GS_SCALE", fixed(scale, digits));
+    plan.insert("PS2X_GS_HW_SCALE", fixed(scale, digits)); // Waffle's renderer reads the scale from here
     plan.insert("PC_FALLBACK_SMOOTHNESS", "0");
     // The shared queue stays non-blocking at high scale; the value can be overridden for diagnostics.
     keep_inherited(&mut plan, "GOW_PRESENT_BLOCKING", "0");
     keep_inherited(&mut plan, "GOW_SHARED_WAIT_US", "0");
-    // FPS limit: the game's real frame rate. 60 is the PS2's own; 120 and 240 (experimental) run the game logic at that
-    // rate (PC_LOGIC_FPS, src/game/gow_logic_rate.cpp) with the game kept at real-time speed. The window refreshes at the
-    // display's rate, whatever the limit. Any other value in settings.json snaps to the nearest limit.
+    // FPS limit: the game's real frame rate. 60 is the PS2's own; 120 runs the game logic at that rate (PC_LOGIC_FPS,
+    // src/game/gow_logic_rate.cpp) with the game kept at real-time speed. Any other value in settings.json snaps to the
+    // nearest limit. At 60 the window refreshes at 60: only then does the runtime pace it by the game's own VBlank
+    // (hostSyncToVBlank in ps2_runtime.cpp), the smoothest mode measured; a 120 Hz window on a 144 Hz display ran on its
+    // own timer instead and showed 46 to 54 new pictures per second while the game made 60. At 120 the window refreshes at
+    // the display's rate, at most MAX_FPS.
     let fps = fps_limit(settings.fps_limit);
     plan.insert("PC_GAME_FPS", "60");
-    plan.insert("PC_WINDOW_FPS", ctx.refresh_hz.clamp(60, 360).to_string());
+    let window_fps = if fps > 60 { ctx.refresh_hz.clamp(60, MAX_FPS) } else { 60 };
+    plan.insert("PC_WINDOW_FPS", window_fps.to_string());
     if fps > 60 {
         plan.insert("PC_LOGIC_FPS", fps.to_string());
     } else {
@@ -310,6 +324,10 @@ pub fn build_environment(ctx: &LaunchContext<'_>, inherited: impl Fn(&str) -> Op
     plan.flag("PC_SHOW_RAM", settings.show_ram, Some("0"));
     // Early FINISH is on in the runtime by default; "0" turns it off.
     plan.flag("GOW_GS_EARLY_FINISH", settings.early_finish, Some("0"));
+    // Effect switches: on in the runtime by default, "0" masks the effect (src/lib/gs/gs_frontend.cpp).
+    plan.flag("GOW_FX_SHADOWS", settings.fx_shadows, Some("0"));
+    plan.flag("GOW_FX_ADDITIVE", settings.fx_additive, Some("0"));
+    plan.flag("GOW_FX_FILTER", settings.fx_filter, Some("0"));
 
     // Files. The runtime reads the disc from the ISO (without an extracted PART2.PAK there is no complete disc in the
     // directory); without a chosen ISO the first one next to the ELF is used.
@@ -425,7 +443,11 @@ mod tests {
         let defaults = plan(&fixture, 2.0);
         assert_eq!(value(&defaults, "PS2X_GS_WORKER"), Some("1"));
         assert_eq!(value(&defaults, "GOW_PERF_FRAME_PC"), Some("0x001837B8"));
+        assert_eq!(value(&defaults, "GOW_NATIVE_CHEATS_MENU"), Some("1"));
         assert_eq!(value(&defaults, "GOW_PRESENT_BLOCKING"), Some("0"));
+        // the user can turn the Port Options entry off from the environment
+        let off = plan_with(&fixture, 2.0, |name| (name == "GOW_NATIVE_CHEATS_MENU").then(|| "0".to_string()));
+        assert_eq!(value(&off, "GOW_NATIVE_CHEATS_MENU"), None);
         let overridden = plan_with(&fixture, 2.0, |name| (name == "PS2X_GS_WORKER").then(|| "0".to_string()));
         assert_eq!(value(&overridden, "PS2X_GS_WORKER"), None);
         assert_eq!(overridden.resolve("PS2X_GS_WORKER", |_| Some("0".into())), Some("0".into()));
@@ -455,11 +477,15 @@ mod tests {
             ("PC_TITLE", "God of War"),
             ("PC_WIDESCREEN", "16:9"),
             ("PC_WIDTH", "1280"),
-            ("PC_WINDOW_FPS", "144"), // the test display's refresh rate
+            ("PC_WINDOW_FPS", "60"), // at the 60 limit the window follows the game's VBlank
             ("GOW_AUDIO_DEVICE", "default"),
             ("GOW_CANCEL", "1"),
+            ("GOW_FX_ADDITIVE", "1"),
+            ("GOW_FX_FILTER", "1"),
+            ("GOW_FX_SHADOWS", "1"),
             ("GOW_GS_EARLY_FINISH", "1"),
             ("GOW_GS_FINISH_ASYNC", "1"),
+            ("GOW_NATIVE_CHEATS_MENU", "1"),
             ("GOW_PERF_DIAG", "1"),
             ("GOW_PERF_FRAME_PC", "0x001837B8"),
             ("GOW_PRESENT_BLOCKING", "0"),
@@ -686,23 +712,23 @@ mod tests {
         fixture.settings.vsync = true;
         let two = plan(&fixture, 2.0);
         assert_eq!(value(&two, "PC_LOGIC_FPS"), Some("120"));
-        assert_eq!(value(&two, "PC_WINDOW_FPS"), Some("144")); // the test display refreshes at 144 Hz
+        assert_eq!(value(&two, "PC_WINDOW_FPS"), Some("120")); // the test display refreshes at 144 Hz: capped at MAX_FPS
         assert_eq!(value(&two, "GOW_PRESENT_MIN_INTERVAL_US"), Some("6666"));
         assert_eq!(value(&two, "PC_VSYNC"), Some("1"));
         assert_eq!(value(&plan(&fixture, 3.0), "PC_LOGIC_FPS"), Some("120"));
         // 60 is the game's own logic rate: the experimental switch is removed, not set to 60.
         fixture.settings.fps_limit = 60;
         assert!(plan(&fixture, 2.0).remove.contains("PC_LOGIC_FPS"));
-        assert_eq!(value(&plan(&fixture, 2.0), "PC_WINDOW_FPS"), Some("144"));
+        assert_eq!(value(&plan(&fixture, 2.0), "PC_WINDOW_FPS"), Some("60")); // paced by the game's VBlank, even at 144 Hz
         assert_eq!(value(&plan(&fixture, 3.0), "GOW_PRESENT_MIN_INTERVAL_US"), Some("13333"));
-        fixture.settings.fps_limit = 240;
-        assert_eq!(value(&plan(&fixture, 2.0), "PC_LOGIC_FPS"), Some("240"));
+        fixture.settings.fps_limit = 240; // an old setting: never above the cap
+        assert_eq!(value(&plan(&fixture, 2.0), "PC_LOGIC_FPS"), Some("120"));
         assert_eq!(value(&plan(&fixture, 7.0), "PS2X_GS_SCALE"), Some("7.0"));
         assert_eq!(value(&plan(&fixture, 10.0), "PS2X_GS_SCALE"), Some("8.0"));
     }
 
     #[test]
-    fn stored_fps_values_snap_to_60_120_or_240() {
+    fn stored_fps_values_snap_to_60_or_120() {
         for (stored, expected) in [
             (0, 60),
             (30, 60),
@@ -711,19 +737,19 @@ mod tests {
             (120, 120),
             (144, 120),
             (165, 120),
-            (200, 240),
-            (240, 240),
-            (500, 240),
+            (200, 120),
+            (240, 120),
+            (500, 120),
         ] {
             assert_eq!(fps_limit(stored), expected, "stored {stored}");
         }
     }
 
     #[test]
-    fn the_window_refresh_is_kept_between_60_and_360() {
+    fn the_window_refresh_is_kept_between_60_and_120() {
         let mut fixture = fixture();
-        fixture.settings.fps_limit = 240;
-        for (hz, expected) in [(30, "60"), (60, "60"), (165, "165"), (500, "360")] {
+        fixture.settings.fps_limit = 120;
+        for (hz, expected) in [(30, "60"), (60, "60"), (100, "100"), (144, "120"), (165, "120"), (500, "120")] {
             assert_eq!(value(&plan_at(&fixture, 2.0, hz, |_| None), "PC_WINDOW_FPS"), Some(expected), "{hz} Hz");
         }
     }

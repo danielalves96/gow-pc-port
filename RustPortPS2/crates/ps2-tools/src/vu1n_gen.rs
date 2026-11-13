@@ -979,6 +979,53 @@ fn gen_block(pairs: &[Pair], tail_out: &mut Vec<Tail>) -> Option<Vec<String>> {
     Some(lines)
 }
 
+/// GOW-Port: loop folding. The body of a block that branches back to its own start, as a function that runs up to `loopMax`
+/// iterations of it (`<name>_loop`, registered beside the single-pass function). Returns `iterations << 32 | next pc`.
+///
+/// Why this is exact: the single-pass function and this one share every line of the body, so values, memory and flag-ring pushes
+/// of an iteration are the same lines in the same order. What the runtime does between two iterations of the same block is
+/// replaced by this function (`n.start` advances by the idle length `n.loopLen`, each iteration's tail record goes where the
+/// history entry of that iteration would have it: `VU1NativeAccess::loopTail`) or by `VU1NativeAccess::foldIterations` afterwards
+/// (history entries, FDIV timing, retire). Only blocks where nothing else can happen between two iterations are folded: no callout
+/// (it commits pipelines and imports flags), no XGKICK / E / D / T bit (they leave the block), no read of flags written before the
+/// block (`macAt` / `clipAt`: those need exact entry timing, not the idle table every iteration uses here), a branch to the block's
+/// own first pair that is not a jump through a register, and no link register write.
+fn gen_loop(pairs: &[Pair], body: &[String], has_tail: bool) -> Option<Vec<String>> {
+    let n = pairs.len();
+    if n < 2 {
+        return None;
+    }
+    let (l, u) = pairs[n - 2];
+    if !is_branch(l, u) || !matches!(l >> 25, 0x20 | 0x28 | 0x29 | 0x2C | 0x2D | 0x2E | 0x2F) {
+        return None;
+    }
+    let target = (8 * (n as i64 - 2) + 8 + i64::from(sx(l, 11)) * 8).rem_euclid(0x4000);
+    if target != 0 {
+        return None;
+    }
+    if pairs.iter().any(|&(_, up)| (up >> 30) & 1 != 0 || (up >> 28) & 1 != 0 || (up >> 27) & 1 != 0) {
+        return None;
+    }
+    let forbidden = ["VU1NativeAccess::call", "VU1NativeAccess::xgkick", "macAt(", "clipAt("];
+    if body.iter().any(|line| forbidden.iter().any(|f| line.contains(f))) {
+        return None;
+    }
+    let (last, rest) = body.split_last()?;
+    let end_pc = last.strip_prefix("return taken ? target : ")?.strip_suffix(';')?;
+    let mut out = vec!["uint32_t loopIt = 0;".to_owned(), "for (;;)".to_owned(), "{".to_owned()];
+    if has_tail {
+        out.push("    n.tail = VU1NativeAccess::loopTail(n, loopIt);".to_owned());
+    }
+    out.extend(rest.iter().map(|line| format!("    {line}")));
+    out.push(format!("    const uint32_t loopResult = taken ? target : {end_pc};"));
+    out.push("    ++loopIt;".to_owned());
+    out.push("    if (loopResult != n.pc || loopIt >= loopMax)".to_owned());
+    out.push("        return (static_cast<uint64_t>(loopIt) << 32) | loopResult;".to_owned());
+    out.push("    n.start += n.loopLen;".to_owned());
+    out.push("}".to_owned());
+    Some(out)
+}
+
 /// Options of `vu1n-gen`.
 pub struct Options {
     pub output: PathBuf,
@@ -993,6 +1040,8 @@ struct BlockEntry {
     pc: u32,
     pairs: usize,
     body: Option<Vec<String>>,
+    /// GOW-Port: the loop-folded variant of `body` (see `gen_loop`).
+    loop_body: Option<Vec<String>>,
     tail: Option<Tail>,
 }
 
@@ -1007,7 +1056,7 @@ struct BlockEntry {
 // Idea from gow-native-pc runtime patch 22 (VU1 analysis cache by image content, generator and heads).
 
 /// Bump when what an image contributes changes (heads_of, extent, scan_heads, the key).
-const CACHE_FORMAT: u32 = 3; // GOW-Port: 2 = no clamp after ADD / SUB / MUL, 3 = operands normalised once per block (planning 3.2)
+const CACHE_FORMAT: u32 = 4; // GOW-Port: 2 = no clamp after ADD / SUB / MUL, 3 = operands normalised once per block (planning 3.2), 4 = loop-folded variants of self-looping blocks
 
 /// Where an image stands in input order: the index of the input argument, then the path (a folder's files sorted).
 type Order = (u32, String);
@@ -1254,7 +1303,9 @@ pub fn run(options: &Options) -> Result<String, String> {
         if body.is_none() {
             unsupported += 1;
         }
-        blocks.insert(*key, BlockEntry { pc: block.pc, pairs: pairs.len(), body, tail: tail.into_iter().next() });
+        let tail = tail.into_iter().next();
+        let loop_body = body.as_ref().and_then(|b| gen_loop(&pairs, b, tail.is_some()));
+        blocks.insert(*key, BlockEntry { pc: block.pc, pairs: pairs.len(), body, loop_body, tail });
     }
 
     fs::create_dir_all(&options.output).map_err(|e| format!("{}: {e}", options.output.display()))?;
@@ -1262,6 +1313,7 @@ pub fn run(options: &Options) -> Result<String, String> {
     let mut texts: Vec<Vec<String>> = vec![Vec::new(); parts];
     let mut regs: Vec<Vec<String>> = vec![Vec::new(); parts];
     let mut count = 0usize;
+    let mut folded = 0usize;
     for (key, entry) in &blocks {
         let Some(body) = &entry.body else {
             continue;
@@ -1300,13 +1352,23 @@ pub fn run(options: &Options) -> Result<String, String> {
         t.extend(body.iter().map(|line| format!("    {line}")));
         t.push("}".to_owned());
         t.push(String::new());
+        if let Some(loop_body) = &entry.loop_body {
+            t.push(format!("static uint64_t {name}_loop(VU1NativeCtx &n, uint32_t loopMax)"));
+            t.push("{".to_owned());
+            t.push("    VU1State &s = *n.s;".to_owned());
+            t.extend(loop_body.iter().map(|line| format!("    {line}")));
+            t.push("}".to_owned());
+            t.push(String::new());
+            folded += 1;
+        }
         texts[part].push(t.join("\n"));
         // Bit 16: the block reads flags written before it; only such blocks need exact entry timing (see runNative).
         let reads_entry = body.iter().any(|line| line.contains("macAt(") || line.contains("clipAt("));
         regs[part].push(format!(
-            "    vu1nRegisterBlock(0x{key:016x}ull, {name}, {}u, {});",
+            "    vu1nRegisterBlock(0x{key:016x}ull, {name}, {}u, {}{});",
             entry.pairs | if reads_entry { 0x10000 } else { 0 },
-            if entry.tail.is_some() { format!("&{name}_tail") } else { "nullptr".to_owned() }
+            if entry.tail.is_some() { format!("&{name}_tail") } else { "nullptr".to_owned() },
+            if entry.loop_body.is_some() { format!(", {name}_loop") } else { String::new() }
         ));
     }
 
@@ -1327,7 +1389,7 @@ pub fn run(options: &Options) -> Result<String, String> {
     let read =
         if cached.is_some() { format!(" ({} read, the rest from the cache)", fresh.len()) } else { String::new() };
     Ok(format!(
-        "[vu1n_gen] {} images{read}, {} distinct blocks, {count} generated, {unsupported} unsupported",
+        "[vu1n_gen] {} images{read}, {} distinct blocks, {count} generated, {unsupported} unsupported, {folded} loop-folded",
         inputs.len(),
         blocks.len()
     ))

@@ -25,6 +25,12 @@ therefore compatible with it; the permissive libraries keep their own licenses a
 | [SOCOM Unzipped](https://github.com/Scotho/socom-unzipped) | Scotho | The XGKICK packet-snapshot idea (`GOW_XGKICK_IMMEDIATE`) and a second reference for VIF unpack. | `…/src/lib/vu/ps2_vu1_core.cpp` | see upstream repository |
 | [ps2-port-engine](https://github.com/danielgomesvieira2000/ps2-port-engine) | danielgomesvieira2000 | The structure of the texture-pack loader (`host/src/texture_pack.cpp`), MIT; the naming/hash algorithm itself is PCSX2's. | `…/src/lib/gs/gpu/gs_texture_replace.cpp` | MIT |
 
+The research notes of [gow-native-pc](https://github.com/Vnnc1/gow-native-pc) (GPL-3.0, release candidate 0.6.0-rc.1)
+pointed this port at several places in the game: where a movie ends (`0x188848`, `0x189B00`, `0x189A88`), which call completes a
+save (`0x22E800`), and how to tell shadow volumes and additive effects apart by their GS state. Their patches were not applied
+and no code was copied: the addresses were checked against this port's own generated code and the implementations are
+this project's (`gow_movie.cpp`, `gow_save.cpp`, `gs_frontend.cpp`).
+
 The widescreen support is based on the **PCSX2 "Widescreen 16:9" patch for `SCUS-97399`** by **nemesis2000** and
 **CRASHARKI**. The patch's instruction words are stored (with attribution) in
 [`gow-port.toml`](../RustPortPS2/games/scus-97399/gow-port.toml).

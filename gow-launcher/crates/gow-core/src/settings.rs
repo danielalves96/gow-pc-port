@@ -5,10 +5,13 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub const SETTINGS_VERSION: u32 = 13;
+pub const SETTINGS_VERSION: u32 = 14;
 
 /// Highest internal GS scale the launcher offers (the runtime also keeps it within the GPU's texture limit).
 pub const MAX_SCALE: f64 = 8.0;
+
+/// Lowest internal GS scale the launcher offers: a quarter of the PS2's resolution, for integrated GPUs.
+pub const MIN_SCALE: f64 = 0.25;
 
 /// Value of the four Shade Boost settings that leaves the picture as the game draws it.
 pub const IMAGE_NEUTRAL: i32 = 50;
@@ -36,7 +39,7 @@ pub struct Settings {
     pub gamma: i32,
     pub saturation: i32,
     pub progressive480p: bool,
-    /// "auto" or "1".."8" (`PS2X_GS_SCALE`).
+    /// "auto" or "0.25".."8" (`PS2X_GS_SCALE`). Below 1 the game is drawn smaller than the PS2 and stretched (integrated GPUs).
     pub internal_resolution: String,
     pub fps_limit: i32,
     pub vsync: bool,
@@ -48,6 +51,11 @@ pub struct Settings {
     pub show_ram: bool,
     /// Early FINISH (`GOW_GS_EARLY_FINISH`): the game prepares the next frame while the current one is still drawn.
     pub early_finish: bool,
+    /// Effect switches for weak GPUs (`GOW_FX_SHADOWS`, `GOW_FX_ADDITIVE`, `GOW_FX_FILTER`): character shadows, additive 3D
+    /// effects (fire, glows, particles) and bilinear texture filtering. On is the game as it is drawn.
+    pub fx_shadows: bool,
+    pub fx_additive: bool,
+    pub fx_filter: bool,
     pub elf: String,
     pub iso: String,
     pub executable: String,
@@ -73,6 +81,9 @@ pub struct Settings {
     pub cancel_animations: bool,
     pub esc_quits: bool,
     pub minimize_on_play: bool,
+    /// Opening the launcher starts the game without the window (issue #40; see `direct`). Shift while it opens, or
+    /// `--launcher`, shows the window.
+    pub skip_launcher: bool,
     pub seconds_played: u64,
     pub last_session: u64,
     /// Key map in JSON (empty = default scheme).
@@ -120,6 +131,9 @@ impl Default for Settings {
             show_cpu: false,
             show_ram: false,
             early_finish: true,
+            fx_shadows: true,
+            fx_additive: true,
+            fx_filter: true,
             elf: String::new(),
             iso: String::new(),
             executable: String::new(),
@@ -137,6 +151,7 @@ impl Default for Settings {
             cancel_animations: true,
             esc_quits: false,
             minimize_on_play: true,
+            skip_launcher: false,
             seconds_played: 0,
             last_session: 0,
             keys: String::new(),
@@ -273,6 +288,12 @@ impl Settings {
             }
             self.settings_version = 13;
         }
+        if self.settings_version < 14 {
+            // The project never runs above 120 FPS (crate::launch::MAX_FPS): the experimental 240 is gone, and whoever had it
+            // gets 120.
+            self.fps_limit = crate::launch::fps_limit(self.fps_limit) as i32;
+            self.settings_version = 14;
+        }
         if self.language != "pt-BR" && self.language != "en" {
             self.language = if prefers_portuguese { "pt-BR".into() } else { "en".into() };
         }
@@ -281,10 +302,10 @@ impl Settings {
         }
     }
 
-    /// Internal GS scale actually requested: "auto" and anything above 8 fall back to 2x.
+    /// Internal GS scale actually requested: "auto" and anything above 8 fall back to 2x, anything below a quarter to 0.25x.
     pub fn selected_scale(&self) -> f64 {
         match self.internal_resolution.parse::<f64>() {
-            Ok(n) if self.internal_resolution != "auto" && n <= MAX_SCALE => n.max(1.0),
+            Ok(n) if self.internal_resolution != "auto" && n <= MAX_SCALE => n.max(MIN_SCALE),
             _ => 2.0,
         }
     }
@@ -313,6 +334,9 @@ impl Settings {
         self.reset_image_adjustment();
         self.progressive480p = true;
         self.internal_resolution = "2".into();
+        self.fx_shadows = true;
+        self.fx_additive = true;
+        self.fx_filter = true;
         self.fps_limit = 60;
         self.vsync = false;
         self.show_fps = false;
@@ -400,6 +424,15 @@ mod tests {
     }
 
     #[test]
+    fn version_fourteen_caps_the_fps_limit_at_120() {
+        for (stored, expected) in [(60, 60), (120, 120), (240, 120)] {
+            let mut settings = Settings { settings_version: 13, fps_limit: stored, ..Settings::default() };
+            settings.migrate(false, &DisplayInfo::default());
+            assert_eq!(settings.fps_limit, expected, "stored {stored}");
+        }
+    }
+
+    #[test]
     fn version_thirteen_keeps_the_whole_osd_for_whoever_had_the_fps_switch_on() {
         let mut shown = Settings { settings_version: 12, show_fps: true, ..Settings::default() };
         shown.migrate(false, &DisplayInfo::default());
@@ -468,7 +501,9 @@ mod tests {
         assert_eq!(scale("8"), 8.0);
         assert_eq!(scale("6"), 6.0);
         assert_eq!(scale("3"), 3.0);
-        assert_eq!(scale("0.5"), 1.0);
+        assert_eq!(scale("0.5"), 0.5);
+        assert_eq!(scale("0.1"), 0.25);
+        assert_eq!(scale("0.75"), 0.75);
         assert_eq!(scale("x"), 2.0);
     }
 

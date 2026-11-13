@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ps2_tools::{chd, elfcheck, iso, memcard, vu1, xdelta};
+use ps2_tools::{chd, elfcheck, iop_manifest, iso, memcard, vu1, xdelta};
 
 const USAGE: &str = "usage:
   ps2-tools verify-elf ELF [--map funcmap.csv] [--allow-modified]
@@ -13,6 +13,8 @@ const USAGE: &str = "usage:
   ps2-tools vu1-manifest extend ELF MANIFEST CAPTURES OUT
   ps2-tools vu1-programs apply ELF MANIFEST OUTDIR
   ps2-tools vu1-programs report ELF MANIFEST
+  ps2-tools iop-manifest apply GAMEDIR MANIFEST OUTDIR
+  ps2-tools iop-manifest verify GAMEDIR MANIFEST DUMPDIR
   ps2-tools iop-gen DUMPDIR OUTDIR [--overrides FILE]
   ps2-tools vu1n-gen OUTDIR INPUT... [--heads heads.txt] [--parts N] [--cache FILE | --no-cache]
   ps2-tools xdelta-apply PATCH BASE_ISO OUTPUT_ISO
@@ -262,6 +264,14 @@ fn run(args: &[String]) -> Result<i32, String> {
             &PathBuf::from(captures),
             &PathBuf::from(output),
         ),
+        ("iop-manifest", [sub, game, manifest, folder]) => {
+            let (game, manifest, folder) = (PathBuf::from(game), PathBuf::from(manifest), PathBuf::from(folder));
+            match sub.as_str() {
+                "apply" => iop_manifest::apply_manifest(&game, &manifest, &folder),
+                "verify" => iop_manifest::verify_manifest(&game, &manifest, &folder),
+                _ => Err(USAGE.to_owned()),
+            }
+        }
         ("vu1-programs", [sub, elf, manifest, rest @ ..]) => match (sub.as_str(), rest) {
             ("apply", [folder]) => {
                 vu1::apply_programs(&PathBuf::from(elf), &PathBuf::from(manifest), &PathBuf::from(folder))

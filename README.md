@@ -41,7 +41,7 @@
 is then compiled into a normal PC program. The PlayStation 2 hardware around it (graphics synthesizer, vector unit, I/O
 processor, sound, pad, memory card) is implemented natively. Nothing interprets the game's code at run time.
 
-On top of that you get the original 60 Hz game logic (or a 120 FPS limit, or an experimental 240, at the same speed), an
+On top of that you get the original 60 Hz game logic (or a 120 FPS limit, the highest, at the same speed), an
 OpenGL renderer with 1×–8× internal resolution, native movies
 with sound, a launcher with settings, keyboard and mouse support, a cheat menu, target lock, widescreen, custom texture
 packs and RetroAchievements.
@@ -51,7 +51,7 @@ packs and RetroAchievements.
 | | An emulator (e.g. PCSX2) | This port |
 |---|---|---|
 | How the game runs | Executes the original MIPS binary instruction by instruction | **Translates it to C++ once**, then compiles that into `gow-2005` |
-| PS2 hardware | Emulated: CPU, GS, VU, IOP, DMA, timers… | **Native services**: OpenGL GS, VU1 microcode compiled ahead of time, the game's IRX modules compiled to C++ by the optimization pass |
+| PS2 hardware | Emulated: CPU, GS, VU, IOP, DMA, timers… | **Native services**: OpenGL GS, VU1 microcode compiled ahead of time, the game's IRX modules compiled to C++ at installation, from the disc (no game run) |
 | BIOS | Requires a PS2 BIOS dump | **None.** Kernel and library services are implemented in the runtime |
 | Your disc | Mounted or emulated on every run | Read once at install time; afterwards the extracted files are read by native disc code |
 | What you run | A console application inside a virtual machine | An ordinary native executable, `gow-2005` |
@@ -62,17 +62,18 @@ game's own recompiled code and replaces the libraries that code calls with nativ
 
 ## Features
 
-- **Native renderer**: OpenGL 4.6, GPU render targets, internal resolution 1×–8×, bicubic (with sharpening),
+- **Native renderer**: OpenGL 4.6, GPU render targets, internal resolution 0.25×–8× (below 1× for integrated GPUs), bicubic (with sharpening),
   bilinear or pixel upscaling, FXAA, 480p progressive mode, brightness/contrast/gamma/saturation adjustment.
 - **Widescreen (Hor+)**: 16:9, 16:10, 21:9 (experimental) and 32:9 (very experimental: stretched HUD and menus) using PCSX2's patch. Switch it off for the game's original 4:3.
 - **Movies**: MPEG-2 decoded natively, with sound, including the game's own widescreen versions.
 - **Controls**: remappable keyboard and mouse, any gamepad, PS2 or modern layout, per-button swaps, vibration on
   Windows and Linux.
 - **Quality of life**: cheat menu (**F2**, nine cheats), target lock (**Alt**), agile combat, overlay with FPS, GPU, CPU and RAM (each one optional), fullscreen.
-- **Saves**: a PCSX2-compatible `Mcd001.ps2` memory card. Cards move between the two in either direction.
+- **Saves**: a PCSX2-compatible `Mcd001.ps2` memory card. Cards move between the two in either direction. A dated copy of the card is kept at every altar save. The launcher's Saves tab shows each save with its altar, thumbnail, difficulty and play time, loads one even with the game open, and restores a copy.
 - **Custom textures**: PCSX2 replacement packs work, and the launcher can download the community pack.
+- **Steam and shortcuts**: the launcher can open the game directly, without its window, and close with it, so it can be added to Steam as a non-Steam game ([`docs/LAUNCHER.md`](docs/LAUNCHER.md#starting-the-game-without-the-launcher)).
 - **RetroAchievements**: sign-in, in-game notifications and a hardcore mode that disables cheats.
-- **Launcher**: eight tabs, a setup wizard, background optimization, English and Brazilian Portuguese.
+- **Launcher**: nine tabs, a setup wizard, background optimization, English and Brazilian Portuguese.
 
 ## Platform support
 
@@ -178,14 +179,17 @@ Everything else (the full cheat list, target lock rules, agile combat, memory ca
 ## Performance
 
 The game runs at 60 FPS by default, the PS2's own rate, always at real-time speed: late frames are dropped, never slowed
-down. The launcher's 120 FPS limit and the **experimental** 240 run the game logic at that rate, smoother but never
-faster; the window refreshes at the monitor's rate.
+down. The launcher's 120 FPS limit runs the game logic at that rate, smoother but never faster; at 60 the window follows the game's own
+frames, at 120 it refreshes at the monitor's rate, at most 120. Nothing runs above 120 FPS: past it a weak PC gets no smoother, only hotter.
 
 - **Internal resolution 2× is the sweet spot.** 3× and above are heavy and, on mid-range cards, can stall the
   presentation.
 - The CPU side is dominated by the **VU1** (the vector unit). Every optimization pass converts more of it to native
   code: run `install.cmd -Optimize` / `./install.sh --optimize` after playing new areas, or let the launcher's
   background optimization finish.
+- Clang builds (the Windows default) already use a speed profile (PGO) that ships with the repository and holds nothing from
+  the game. The launcher's **Optimize now** (`-Pgo on` / `--pgo on`) is an optional extra that trains a full one on your PC,
+  which in tests cut the VU1 and EE time per frame by about 20 % more (it opens the game by itself for 4 minutes).
 - A laptop **power-saving profile can halve the frame rate**, because it clocks down the CPU the VU1 thread needs.
 
 Measured reference points and the tuning order are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
