@@ -298,11 +298,15 @@ pub fn build_environment(ctx: &LaunchContext<'_>, inherited: impl Fn(&str) -> Op
     keep_inherited(&mut plan, "GOW_PRESENT_BLOCKING", "0");
     keep_inherited(&mut plan, "GOW_SHARED_WAIT_US", "0");
     // FPS limit: the game's real frame rate. 60 is the PS2's own; 120 runs the game logic at that rate (PC_LOGIC_FPS,
-    // src/game/gow_logic_rate.cpp) with the game kept at real-time speed. The window refreshes at the display's rate, at
-    // most MAX_FPS. Any other value in settings.json snaps to the nearest limit.
+    // src/game/gow_logic_rate.cpp) with the game kept at real-time speed. Any other value in settings.json snaps to the
+    // nearest limit. At 60 the window refreshes at 60: only then does the runtime pace it by the game's own VBlank
+    // (hostSyncToVBlank in ps2_runtime.cpp), the smoothest mode measured; a 120 Hz window on a 144 Hz display ran on its
+    // own timer instead and showed 46 to 54 new pictures per second while the game made 60. At 120 the window refreshes at
+    // the display's rate, at most MAX_FPS.
     let fps = fps_limit(settings.fps_limit);
     plan.insert("PC_GAME_FPS", "60");
-    plan.insert("PC_WINDOW_FPS", ctx.refresh_hz.clamp(60, MAX_FPS).to_string());
+    let window_fps = if fps > 60 { ctx.refresh_hz.clamp(60, MAX_FPS) } else { 60 };
+    plan.insert("PC_WINDOW_FPS", window_fps.to_string());
     if fps > 60 {
         plan.insert("PC_LOGIC_FPS", fps.to_string());
     } else {
@@ -473,7 +477,7 @@ mod tests {
             ("PC_TITLE", "God of War"),
             ("PC_WIDESCREEN", "16:9"),
             ("PC_WIDTH", "1280"),
-            ("PC_WINDOW_FPS", "120"), // the test display refreshes at 144 Hz: capped at MAX_FPS
+            ("PC_WINDOW_FPS", "60"), // at the 60 limit the window follows the game's VBlank
             ("GOW_AUDIO_DEVICE", "default"),
             ("GOW_CANCEL", "1"),
             ("GOW_FX_ADDITIVE", "1"),
@@ -715,7 +719,7 @@ mod tests {
         // 60 is the game's own logic rate: the experimental switch is removed, not set to 60.
         fixture.settings.fps_limit = 60;
         assert!(plan(&fixture, 2.0).remove.contains("PC_LOGIC_FPS"));
-        assert_eq!(value(&plan(&fixture, 2.0), "PC_WINDOW_FPS"), Some("120"));
+        assert_eq!(value(&plan(&fixture, 2.0), "PC_WINDOW_FPS"), Some("60")); // paced by the game's VBlank, even at 144 Hz
         assert_eq!(value(&plan(&fixture, 3.0), "GOW_PRESENT_MIN_INTERVAL_US"), Some("13333"));
         fixture.settings.fps_limit = 240; // an old setting: never above the cap
         assert_eq!(value(&plan(&fixture, 2.0), "PC_LOGIC_FPS"), Some("120"));

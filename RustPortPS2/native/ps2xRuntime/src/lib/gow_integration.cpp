@@ -183,6 +183,7 @@ bool gowEarlyFinishAvailable(); // GOW-Port: lib/ps2_memory.cpp (the Frame Rate 
 bool gowEarlyFinishGet();
 void gowEarlyFinishSet(bool enabled);
 bool gowVsyncEnabled();
+static void applyWindowVsync(bool wanted, const char *why); // GOW-Port: below (VSync only where the display fits the cap)
 int gowFilterGet(); // GOW-Port: lib/gs/gs_host_present.cpp (the upscaling settings of the Image Quality page)
 void gowFilterSet(int mode);
 int gowSharpnessGet();
@@ -664,6 +665,8 @@ void gowWindowOpen(const char *title)
     }
     if (fullscreen)
         toggleFullscreen();
+    // GOW-Port: the display's rate is known now (after the switch to full screen): VSync only where it fits the cap.
+    applyWindowVsync(gowVsyncEnabled(), "start");
     if (!escClosesGame())
         SetExitKey(KEY_NULL);
 }
@@ -760,6 +763,57 @@ bool gowVsyncEnabled()
         g_vsyncStarted.store(true, std::memory_order_release);
     }
     return g_vsyncWanted.load(std::memory_order_relaxed);
+}
+
+// GOW-Port: the VSync the window really uses. The player's choice (gowVsyncEnabled, shown by the menus) is honoured only on a
+// display that refreshes at kMaxFps or less: on a faster one (144, 165, 240 Hz) VSync would either push the window above the cap
+// or, with the window's own timer at 120 on top of it, make the two clocks fight (a 144 Hz test showed 85 to 100 refreshes and 46
+// to 54 new pictures per second with the game at 60). There the window follows the game's VBlank instead, as without VSync.
+namespace
+{
+    std::atomic<int> g_displayHz{0}; // 0 = not known (the window is not open yet or the system does not say)
+    std::atomic<bool> g_vsyncOnWindow{false};
+
+    bool vsyncFitsTheDisplay()
+    {
+        const int hz = g_displayHz.load(std::memory_order_relaxed);
+        return hz <= 0 || hz <= kMaxFps;
+    }
+}
+
+bool gowVsyncOnWindow()
+{
+    return g_vsyncOnWindow.load(std::memory_order_relaxed);
+}
+
+// Render thread, with the window open: reads the display's rate and sets the window's VSync from the player's choice.
+static void applyWindowVsync(bool wanted, const char *why)
+{
+    g_displayHz.store(GetMonitorRefreshRate(GetCurrentMonitor()), std::memory_order_relaxed);
+    const bool on = wanted && vsyncFitsTheDisplay();
+    g_vsyncOnWindow.store(on, std::memory_order_relaxed);
+    if (on)
+        SetWindowState(FLAG_VSYNC_HINT);
+    else
+        ClearWindowState(FLAG_VSYNC_HINT);
+    if (wanted && !on)
+        std::fprintf(stderr, "[gow-frame] VSync not used (%s): the display refreshes at %d Hz, above the %d FPS cap; the window "
+                             "follows the game's VBlank\n", why, g_displayHz.load(), kMaxFps);
+    else if (why[0] == 'c')
+        std::fprintf(stderr, "[gow-frame] VSync %s (%s)\n", on ? "on" : "off", why);
+}
+
+// GOW-Port: the window timer's rate (SetTargetFPS): 0 when the game's VBlank paces the loop (ps2_runtime.cpp), the display's own
+// rate with VSync (the timer never waits on top of the refresh, which made the two clocks fight), otherwise PC_WINDOW_FPS.
+bool gowHostSyncToVBlank(); // GOW-Port: lib/ps2_runtime.cpp
+int gowWindowTargetFps()
+{
+    if (gowHostSyncToVBlank())
+        return 0;
+    const int hz = g_displayHz.load(std::memory_order_relaxed);
+    if (gowVsyncOnWindow() && hz > 0)
+        return std::min(hz, kMaxFps);
+    return gowWindowFps();
 }
 
 int gowFrameCount()
@@ -1116,9 +1170,6 @@ void gowIntegrationInstall(PS2Runtime &runtime, const std::string &elfPath)
         gowWaitInstall(runtime, elfPath);
 }
 
-// GOW-Port: ps2_runtime.cpp (window loop), before drawing every frame.
-bool gowHostSyncToVBlank(); // GOW-Port: lib/ps2_runtime.cpp
-
 // GOW-Port: window loop (render thread): applies the VSync the menus asked for, and the window pacing that goes with it (with VSync
 // the display paces the loop, without it the game's VBlank does: ps2_runtime.cpp).
 static void gowApplyFrameSettings()
@@ -1127,12 +1178,8 @@ static void gowApplyFrameSettings()
     if (wanted == g_vsyncApplied.load(std::memory_order_relaxed))
         return;
     g_vsyncApplied.store(wanted, std::memory_order_relaxed);
-    if (wanted)
-        SetWindowState(FLAG_VSYNC_HINT);
-    else
-        ClearWindowState(FLAG_VSYNC_HINT);
-    SetTargetFPS(gowHostSyncToVBlank() ? 0 : gowWindowFps());
-    std::fprintf(stderr, "[gow-frame] VSync %s (changed in game)\n", wanted ? "on" : "off");
+    applyWindowVsync(wanted, "changed in game");
+    SetTargetFPS(gowWindowTargetFps());
 }
 
 #if defined(_WIN32)

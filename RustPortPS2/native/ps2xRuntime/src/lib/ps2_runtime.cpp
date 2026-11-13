@@ -76,6 +76,8 @@ std::atomic<uint64_t> g_gowAudioFramesProduced{0};
 void gowWindowOpen(const char *title);
 int gowWindowFps();
 bool gowVsyncEnabled();
+bool gowVsyncOnWindow(); // GOW-Port: the VSync the window really uses (only on a display at 120 Hz or less)
+int gowWindowTargetFps(); // GOW-Port: the window timer's rate (0 when the game's VBlank paces the loop)
 void gowIntegrationInstall(PS2Runtime &runtime, const std::string &elfPath);
 void gowFrameInput();
 
@@ -93,7 +95,7 @@ static bool hostSyncToVBlank()
     }();
     if (!on)
         return false;
-    return !gowVsyncEnabled() && gowWindowFps() == 60; // GOW-Port: VSync can be switched in game (gow_integration.cpp)
+    return !gowVsyncOnWindow() && gowWindowFps() == 60; // GOW-Port: VSync can be switched in game, and is not used above 120 Hz (gow_integration.cpp)
 }
 
 bool gowHostSyncToVBlank()
@@ -928,7 +930,7 @@ bool PS2Runtime::initialize(const char *title)
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         startSpu2Audio(m_iopSubsystem.get()); // GOW-Port
-        SetTargetFPS(hostSyncToVBlank() ? 0 : gowWindowFps()); // GOW-Port: PC_WINDOW_FPS (60 by default); with GOW_SYNC_VBLANK the game's VBlank sets the pace
+        SetTargetFPS(gowWindowTargetFps()); // GOW-Port: PC_WINDOW_FPS (60 by default); with GOW_SYNC_VBLANK the game's VBlank sets the pace, with VSync the display does
         if (m_debugUiInitCallback)
         {
             m_debugUiInitCallback(*this, m_debugUiUserData);
