@@ -446,12 +446,13 @@ namespace
             newCount = windowCount = 0;
             measured = true;
         }
-        // GOW-Port: the OSD shows one frame rate, the real one: the game's own frames per second (entries to its frame
-        // function, which follow the launcher's FPS limit, PC_LOGIC_FPS), plus GPU, CPU and RAM when the system gives them.
-        // The new pictures on screen (newFps), the window refresh (windowFps, the monitor's rate) and the 1 % low stay in
-        // the [gow-osd] log line only.
+        // GOW-Port: the OSD shows two frame rates: the game's own frames per second (entries to its frame function, which follow
+        // the launcher's FPS limit, PC_LOGIC_FPS) and the GS, the new pictures that reached the screen (newFps). They differ when
+        // the picture repeats although the game keeps its rate, which the player feels as stutter. Plus GPU, CPU and RAM when the
+        // system gives them. The window refresh (windowFps) and the 1 % low stay in the [gow-osd] log line only.
         show.fps = show.fps && measured; // never a made-up 0 while the first second is still being counted
-        gow_osd::draw(x, y, h, gameFps, -1, -1, -1, show);
+        const int gsShown = std::min(newFps, g_gameFrameLimit == 30 ? 30 : gowLogicFps()); // a burst after a hitch is not "61"
+        gow_osd::draw(x, y, h, gameFps, -1, -1, -1, show, gsShown);
     }
     constexpr uint32_t kGowPad2Read = 0x0027B9F0u;
     PS2Runtime::RecompiledFunction g_gowPad2Read = nullptr;

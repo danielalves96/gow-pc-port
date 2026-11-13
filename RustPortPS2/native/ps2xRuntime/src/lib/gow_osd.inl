@@ -336,7 +336,8 @@ namespace gow_osd
         bool system() const { return gpu || cpu || ram; }
     };
 
-    void draw(float x, float y, float h, int fps, int low, int windowHz = -1, int gameFps = -1, Show show = {})
+    // `gsFps`: new GS pictures that reached the screen per second, drawn as "GS" under FPS (-1 = not drawn).
+    void draw(float x, float y, float h, int fps, int low, int windowHz = -1, int gameFps = -1, Show show = {}, int gsFps = -1)
     {
         // the sampler thread (PDH, D3DKMT) only runs when a system value is shown
         if (show.system())
@@ -410,6 +411,13 @@ namespace gow_osd
         // GS FPS: pink name and white number, the same size and in the same column as the other values.
         text("FPS", left, baseline, size, pink);
         cell(col1, baseline, size, std::to_string(fps), "", nDigits3, 0.0f, white, unit);
+        // GOW-Port: GS = new pictures on screen per second; below FPS means the picture repeats and the player sees stutter.
+        if (gsFps >= 0)
+        {
+            baseline += lineHeight;
+            text("GS", left, baseline, size, pink);
+            cell(col1, baseline, size, std::to_string(gsFps), "", nDigits3, 0.0f, white, unit);
+        }
         // GOW-Port: GAME = the guest's frame rate. See the header comment: it is the number that tells the truth when the
         // picture is repeating.
         if (gameFps >= 0)
