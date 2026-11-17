@@ -71,7 +71,7 @@ namespace
     // (44.3 FPS with it, 49.5 without). So the default is 50 us from 4 usable processors up and 0 below.
     uint64_t spinMicroseconds()
     {
-        static const uint64_t us = [] {
+        static const uint64_t us = []() -> uint64_t {
             const char *v = std::getenv("GOW_GS_STAGE_SPIN_US");
             if (v)
                 return static_cast<uint64_t>(std::strtoull(v, nullptr, 10));
